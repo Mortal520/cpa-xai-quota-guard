@@ -36,6 +36,7 @@ func configFields() []pluginapi.ConfigField {
 		{Name: "patrol_auth_dir", Type: pluginapi.ConfigFieldTypeString, Description: "auth file 所在目录(如 /root/.cli-proxy-api)"},
 		{Name: "patrol_proxy_url", Type: pluginapi.ConfigFieldTypeString, Description: "巡查探测使用的代理(可选,如 socks5://host:port)"},
 		{Name: "patrol_concurrency", Type: pluginapi.ConfigFieldTypeNumber, Description: "巡查并发线程数(默认8)"},
+		{Name: "patrol_model", Type: pluginapi.ConfigFieldTypeString, Description: "巡查探测模型(默认 grok-4.5-build-free；勿用无免费额度的付费模型，否则易误报 spending-limit)"},
 	}
 }
 
@@ -148,6 +149,12 @@ func applyConfigMap(cfg *xaiquota.Config, m map[string]any) {
 	}
 	if v, ok := asFloat(m["patrol_concurrency"]); ok && v > 0 {
 		cfg.PatrolConcurrency = int(v)
+	}
+	if v, ok := asString(m["patrol_model"]); ok {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			cfg.PatrolModel = v
+		}
 	}
 }
 

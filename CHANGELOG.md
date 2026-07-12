@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4
+
+- 巡查探测模型可配置：`patrol_model`（默认 `grok-4.5-build-free`）
+- 修复硬编码 `grok-3` 导致正常账号被误判 spending-limit/删除
+- 新增 `GET .../patrol/models`：用启用凭证拉 `/models` + 建议列表；UI 下拉选择
+- 探测日志 reason 带 model= 便于排查
+
 ## 0.2.3
 
 - 402 spending-limit: 改为 plugin_auto 禁用（signal=`spending_limit`），不再 DELETE

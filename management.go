@@ -75,6 +75,7 @@ func buildManagementRegistration() managementRegistration {
 		{Method: "GET", Path: "/cpa-xai-quota-guard/patrol/status", Description: "巡查状态与日志"},
 		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/stop", Description: "停止当前巡查"},
 		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/config", Description: "保存定时巡查配置"},
+		{Method: "GET", Path: "/cpa-xai-quota-guard/patrol/models", Description: "探测可用模型列表(凭证 /models + 建议)"},
 		},
 	}
 }
@@ -179,6 +180,8 @@ func dispatchAPI(req managementRequest, action string) ([]byte, error) {
 		return patrolStopResponse()
 	case "patrol/config":
 		return patrolConfigResponse(req)
+	case "patrol/models":
+		return patrolModelsResponse()
 	default:
 		return okEnvelope(managementResponse{
 			StatusCode: http.StatusNotFound,
@@ -562,6 +565,7 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			"patrol_auth_dir":              cfg.PatrolAuthDir,
 			"patrol_concurrency":           cfg.PatrolConcurrency,
 			"patrol_batch_size":            cfg.PatrolBatchSize,
+			"patrol_model":                cfg.PatrolModel,
 		},
 		"accounts": outList,
 		"summary": map[string]any{
@@ -665,6 +669,7 @@ func configResponse() ([]byte, error) {
 		"patrol_auth_dir":        cfg.PatrolAuthDir,
 		"patrol_concurrency":     cfg.PatrolConcurrency,
 		"patrol_batch_size":      cfg.PatrolBatchSize,
+		"patrol_model":          cfg.PatrolModel,
 	})
 }
 
@@ -755,6 +760,7 @@ func patrolConfigResponse(req managementRequest) ([]byte, error) {
 		PatrolProxyURL  *string `json:"patrol_proxy_url"`
 		PatrolConcurrency *float64 `json:"patrol_concurrency"`
 		PatrolBatchSize *float64 `json:"patrol_batch_size"`
+		PatrolModel     *string  `json:"patrol_model"`
 	}
 	_ = json.Unmarshal(req.Body, &body)
 	cfg := guard().Config()
@@ -779,6 +785,13 @@ func patrolConfigResponse(req managementRequest) ([]byte, error) {
 	if body.PatrolBatchSize != nil {
 		cfg.PatrolBatchSize = int(*body.PatrolBatchSize)
 	}
+	if body.PatrolModel != nil {
+		m := strings.TrimSpace(*body.PatrolModel)
+		if m == "" {
+			m = xaiquota.DefaultPatrolModel
+		}
+		cfg.PatrolModel = m
+	}
 	// Persist full patrol settings into CPA plugin config (GET+merge+PUT).
 	patch := map[string]any{
 		"patrol_enabled":     cfg.PatrolEnabled,
@@ -787,6 +800,7 @@ func patrolConfigResponse(req managementRequest) ([]byte, error) {
 		"patrol_auth_dir":    cfg.PatrolAuthDir,
 		"patrol_concurrency": cfg.PatrolConcurrency,
 		"patrol_batch_size":  cfg.PatrolBatchSize,
+		"patrol_model":       cfg.PatrolModel,
 	}
 	if cfg.PatrolProxyURL != "" {
 		patch["patrol_proxy_url"] = cfg.PatrolProxyURL
@@ -804,6 +818,22 @@ func patrolConfigResponse(req managementRequest) ([]byte, error) {
 		"patrol_auth_dir":    cfg.PatrolAuthDir,
 		"patrol_concurrency": cfg.PatrolConcurrency,
 		"patrol_batch_size":  cfg.PatrolBatchSize,
+		"patrol_model":       cfg.PatrolModel,
+	})
+}
+
+
+func patrolModelsResponse() ([]byte, error) {
+	g := guard()
+	cfg := g.Config()
+	models, source, errMsg := g.ListPatrolModels()
+	return jsonResponse(map[string]any{
+		"ok":           true,
+		"models":       models,
+		"source":       source,
+		"error":        errMsg,
+		"patrol_model": cfg.PatrolModel,
+		"default":      xaiquota.DefaultPatrolModel,
 	})
 }
 
@@ -1006,6 +1036,15 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
       <label style="font-size:.85rem;flex:1;min-width:180px">代理(可选)
         <input id="cfgPatrolProxy" type="text" placeholder="socks5://host:port" style="width:100%">
       </label>
+    </div>
+    <div class="row" style="gap:.6rem;flex-wrap:wrap;margin-top:.4rem;align-items:flex-end">
+      <label style="font-size:.85rem;flex:1;min-width:240px">探测模型
+        <select id="cfgPatrolModel" style="width:100%;min-height:2rem">
+          <option value="grok-4.5-build-free">grok-4.5-build-free（推荐·免费档）</option>
+        </select>
+      </label>
+      <button type="button" onclick="refreshPatrolModels()" style="white-space:nowrap">刷新模型列表</button>
+      <span class="muted" style="font-size:.78rem;max-width:280px" id="patrolModelHint">默认免费档；付费模型可能全体 402 spending-limit</span>
     </div>
     <div class="muted" style="margin-top:.4rem;font-size:.8rem" id="patrolCfgHint">配置加载中…</div>
     <hr style="border:none;border-top:1px solid var(--border);margin:.7rem 0">
@@ -1666,10 +1705,14 @@ async function loadState(){
       document.getElementById("cfgPatrolDir").value = cfg.patrol_auth_dir || "";
       document.getElementById("cfgPatrolCon").value = cfg.patrol_concurrency || 8;
       document.getElementById("cfgPatrolBatch").value = cfg.patrol_batch_size || 0;
+      var pm = cfg.patrol_model || "grok-4.5-build-free";
+      ensurePatrolModelOption(pm);
+      document.getElementById("cfgPatrolModel").value = pm;
+      try{ refreshPatrolModels(true); }catch(e){}
       document.getElementById("cfgPatrolProxy").value = ""; // sensitive, not echoed
       ph.textContent = pen
-        ?("已启用 · 周期"+(cfg.patrol_interval||"?")+"s · 并发"+(cfg.patrol_concurrency||"?")+" · 目录"+(cfg.patrol_auth_dir||"?"))
-        :("未启用 · 可勾选后点保存配置");
+        ?("已启用 · 周期"+(cfg.patrol_interval||"?")+"s · 并发"+(cfg.patrol_concurrency||"?")+" · 模型"+(cfg.patrol_model||"?")+" · 目录"+(cfg.patrol_auth_dir||"?"))
+        :("未启用 · 模型"+(cfg.patrol_model||"grok-4.5-build-free")+" · 可勾选后点保存配置");
     }
     const list = sortAccounts(d.accounts || []);
     d.accounts = list;
@@ -1720,6 +1763,45 @@ function saveKey(){
   setMgmtKey(v);
   loadState();
 }
+
+function ensurePatrolModelOption(id){
+  if(!id) return;
+  var sel = document.getElementById("cfgPatrolModel");
+  if(!sel) return;
+  for(var i=0;i<sel.options.length;i++){ if(sel.options[i].value===id) return; }
+  var opt = document.createElement("option");
+  opt.value = id; opt.textContent = id;
+  sel.appendChild(opt);
+}
+async function refreshPatrolModels(silent){
+  var hint = document.getElementById("patrolModelHint");
+  try{
+    var r = await api("patrol/models");
+    var models = (r && r.models) || [];
+    var sel = document.getElementById("cfgPatrolModel");
+    var cur = sel ? sel.value : "";
+    if(r && r.patrol_model) cur = r.patrol_model;
+    if(sel){
+      var keep = cur || (r && r.default) || "grok-4.5-build-free";
+      sel.innerHTML = "";
+      (models||[]).forEach(function(m){
+        var opt = document.createElement("option");
+        opt.value = m;
+        opt.textContent = m + (String(m).indexOf("free")>=0 ? " · 免费档推荐" : "");
+        sel.appendChild(opt);
+      });
+      ensurePatrolModelOption(keep);
+      sel.value = keep;
+    }
+    if(hint){
+      var src = (r && r.source) || "?";
+      var err = (r && r.error) ? (" · "+r.error) : "";
+      hint.textContent = "列表来源: "+src+err+" · 当前将用于巡查探测";
+    }
+  }catch(e){
+    if(hint) hint.textContent = "模型列表加载失败: "+(e&&e.message?e.message:e);
+  }
+}
 async function savePatrolConfig(){
   var body = {
     patrol_enabled: document.getElementById("cfgPatrolEn").checked,
@@ -1728,7 +1810,8 @@ async function savePatrolConfig(){
     patrol_auth_dir: document.getElementById("cfgPatrolDir").value.trim(),
     patrol_proxy_url: document.getElementById("cfgPatrolProxy").value.trim(),
     patrol_concurrency: Number(document.getElementById("cfgPatrolCon").value)||8,
-    patrol_batch_size: Number(document.getElementById("cfgPatrolBatch").value)||0
+    patrol_batch_size: Number(document.getElementById("cfgPatrolBatch").value)||0,
+    patrol_model: (document.getElementById("cfgPatrolModel").value||"").trim()||"grok-4.5-build-free"
   };
   var ph = document.getElementById("patrolCfgHint");
   if(ph) ph.textContent = "保存中…";
@@ -1739,7 +1822,7 @@ async function savePatrolConfig(){
       alert("巡查配置保存失败: " + JSON.stringify(r&&r.error||r));
       return;
     }
-    if(ph) ph.textContent = "已保存 · " + (body.patrol_enabled?"已启用":"未启用") + " · 周期"+body.patrol_interval+"s" + " · 并发"+body.patrol_concurrency;
+    if(ph) ph.textContent = "已保存 · " + (body.patrol_enabled?"已启用":"未启用") + " · 周期"+body.patrol_interval+"s" + " · 并发"+body.patrol_concurrency + " · 模型"+(body.patrol_model||"");
     loadState();
   } catch(e){
     if(ph) ph.textContent = "保存异常: " + (e&&e.message?e.message:e);

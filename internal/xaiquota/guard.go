@@ -36,6 +36,9 @@ type Config struct {
 	PatrolAuthDir     string
 	PatrolProxyURL   string
 	PatrolConcurrency int
+	// PatrolModel is the upstream model id used for credential probes.
+	// Prefer free-tier models (e.g. grok-4.5-build-free); paid models may false-positive as spending-limit.
+	PatrolModel string
 
 }
 
@@ -55,6 +58,7 @@ func Defaults() Config {
 			PatrolAuthDir:    "",
 			PatrolProxyURL:    "",
 			PatrolConcurrency: 8,
+			PatrolModel:       DefaultPatrolModel,
 	}
 }
 
@@ -138,6 +142,11 @@ func (g *Guard) ApplyConfig(cfg Config) {
 	}
 	if cfg.StatePath == "" {
 		cfg.StatePath = "data/cpa-xai-quota-guard-state.json"
+	}
+	if strings.TrimSpace(cfg.PatrolModel) == "" {
+		cfg.PatrolModel = DefaultPatrolModel
+	} else {
+		cfg.PatrolModel = strings.TrimSpace(cfg.PatrolModel)
 	}
 	// Reload store if path changed.
 	if g.store == nil || g.store.Path() != cfg.StatePath {

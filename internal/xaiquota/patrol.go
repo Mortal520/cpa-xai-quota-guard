@@ -14,6 +14,20 @@ import (
 	"time"
 )
 
+// DefaultPatrolModel is the free-tier-friendly probe model.
+// Paid models (e.g. grok-3 full) often return personal-team-blocked:spending-limit
+// even when free-tier chat still works — causing false dead/cooldown signals.
+const DefaultPatrolModel = "grok-4.5-build-free"
+
+// SuggestedPatrolModels are common xAI ids shown when live /models is empty.
+var SuggestedPatrolModels = []string{
+	"grok-4.5-build-free",
+	"grok-3-mini",
+	"grok-3",
+	"grok-2-1212",
+	"grok-2",
+}
+
 // patrolState tracks the in-progress or last-completed sweep.
 type patrolState struct {
 	mu            sync.Mutex
@@ -77,6 +91,7 @@ type probeResult struct {
 	action    string // "alive", "deleted", "error", "cooldown_skip"
 	reason    string
 	httpCode  int
+	modelUsed string
 }
 
 // PatrolSweep iterates all enabled xAI auth files with a worker pool,
@@ -325,8 +340,16 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		baseURL = "https://api.x.ai/v1"
 	}
 
-	probeBody := `{"model":"grok-3","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/chat/completions", strings.NewReader(probeBody))
+	model := strings.TrimSpace(g.Config().PatrolModel)
+	if model == "" {
+		model = DefaultPatrolModel
+	}
+	probePayload, _ := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/chat/completions", strings.NewReader(string(probePayload)))
 	if err != nil {
 		return probeResult{
 			authIndex: f.AuthIndex,
@@ -356,6 +379,7 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	bodyStr := string(bodyBytes)
 	code := resp.StatusCode
+	_ = model // used in results
 
 	// Outcomes:
 	// - 200 / non-dead 5xx: alive; if was spending_limit cooldown → re-enable
@@ -381,12 +405,12 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 			})
 			return probeResult{
 				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-				action: "reenabled", reason: reason, httpCode: code,
+				action: "reenabled", reason: reason + " · model=" + model, httpCode: code, modelUsed: model,
 			}
 		}
 		return probeResult{
 			authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-			action: "alive", reason: reason, httpCode: code,
+			action: "alive", reason: reason + " · model=" + model, httpCode: code, modelUsed: model,
 		}
 	}
 
@@ -419,7 +443,7 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 			_ = g.storeUpsert(rec)
 			return probeResult{
 				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-				action: "cooldown", reason: "spending-limit still active", httpCode: code,
+				action: "cooldown", reason: fmt.Sprintf("spending-limit still active (model=%s)", model), httpCode: code, modelUsed: model,
 			}
 		}
 		// Disable if currently enabled.
@@ -453,7 +477,7 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		})
 		return probeResult{
 			authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-			action: "cooldown", reason: truncate(bodyStr, 200), httpCode: code,
+			action: "cooldown", reason: fmt.Sprintf("model=%s · %s", model, truncate(bodyStr, 180)), httpCode: code, modelUsed: model,
 		}
 	}
 	if IsPermissionDenied(code, bodyStr) || IsInvalidCredentials(code, bodyStr) {
@@ -477,7 +501,7 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		})
 		return probeResult{
 			authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-			action: "deleted", reason: truncate(bodyStr, 200), httpCode: code,
+			action: "deleted", reason: fmt.Sprintf("model=%s · %s", model, truncate(bodyStr, 180)), httpCode: code, modelUsed: model,
 		}
 	}
 
@@ -549,4 +573,111 @@ func (g *Guard) PatrolRunOnce() PatrolStatus {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return g.PatrolStatus()
+}
+
+// ListPatrolModels uses one enabled xAI credential to GET /models from upstream.
+// Falls back to SuggestedPatrolModels when no credential or request fails.
+func (g *Guard) ListPatrolModels() (models []string, source string, errMsg string) {
+	seen := map[string]bool{}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		models = append(models, id)
+	}
+	for _, s := range SuggestedPatrolModels {
+		add(s)
+	}
+	source = "suggested"
+	cfg := g.Config()
+	if g.auth == nil {
+		return models, source, "no auth lookup"
+	}
+	files, err := g.auth.List()
+	if err != nil {
+		return models, source, err.Error()
+	}
+	authDir := strings.TrimSpace(cfg.PatrolAuthDir)
+	if authDir == "" {
+		return models, source, "patrol_auth_dir empty"
+	}
+	var pick *AuthFile
+	for i := range files {
+		f := &files[i]
+		if !IsXAIProvider(f.Provider, "") {
+			continue
+		}
+		if f.Disabled {
+			continue
+		}
+		pick = f
+		break
+	}
+	if pick == nil {
+		return models, source, "no enabled xAI credential"
+	}
+	filePath := filepath.Join(authDir, pick.Name)
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		return models, source, err.Error()
+	}
+	var af authFileJSON
+	if err := json.Unmarshal(raw, &af); err != nil {
+		return models, source, err.Error()
+	}
+	if af.AccessToken == "" {
+		return models, source, "no access_token"
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(af.BaseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://api.x.ai/v1"
+	}
+	client := g.newPatrolHTTPClient(12*time.Second, cfg.PatrolProxyURL)
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/models", nil)
+	if err != nil {
+		return models, source, err.Error()
+	}
+	req.Header.Set("Authorization", "Bearer "+af.AccessToken)
+	for k, v := range af.Headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return models, source, err.Error()
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return models, source, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 160))
+	}
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		// try raw array
+		var arr []struct {
+			ID string `json:"id"`
+		}
+		if err2 := json.Unmarshal(body, &arr); err2 != nil {
+			return models, source, "parse models: " + err.Error()
+		}
+		for _, m := range arr {
+			add(m.ID)
+		}
+	} else {
+		for _, m := range parsed.Data {
+			add(m.ID)
+		}
+	}
+	if len(parsed.Data) > 0 || len(models) > len(SuggestedPatrolModels) {
+		source = "credential:" + pick.Name
+	}
+	// ensure current configured model is listed
+	add(cfg.PatrolModel)
+	add(DefaultPatrolModel)
+	return models, source, ""
 }
