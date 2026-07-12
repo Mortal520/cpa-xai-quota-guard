@@ -693,8 +693,13 @@ func toggleResponse(req managementRequest) ([]byte, error) {
 	} else {
 		cfg.Enabled = !cfg.Enabled
 	}
-	// Persist to CPA plugin config so Reconfigure keeps the value.
-	if err := writePluginConfig(cfg, map[string]any{"enabled": cfg.Enabled}); err != nil {
+	// Write functional switch to quota_guard_enabled (NOT CPA host "enabled",
+	// which unloads the plugin and 404s all management routes).
+	// Keep host enabled=true so the plugin stays loaded.
+	if err := writePluginConfig(cfg, map[string]any{
+		"enabled":             true,
+		"quota_guard_enabled": cfg.Enabled,
+	}); err != nil {
 		return jsonResponse(map[string]any{"ok": false, "error": err.Error(), "enabled": cfg.Enabled})
 	}
 	guard().ApplyConfig(cfg)

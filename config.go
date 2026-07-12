@@ -17,7 +17,8 @@ func configDefaults() xaiquota.Config {
 
 func configFields() []pluginapi.ConfigField {
 	return []pluginapi.ConfigField{
-		{Name: "enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "插件总开关（默认关闭）"},
+		{Name: "enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "CPA 加载插件开关（勿用本插件 UI 关闭，否则会卸载路由）"},
+		{Name: "quota_guard_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "额度管控功能开关（UI 切换写入此字段；默认跟随 enabled）"},
 		{Name: "tick_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "到期恢复扫描周期(秒)"},
 		{Name: "max_reset_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "允许的最大重置等待(秒)，超过则不禁用"},
 		{Name: "management_url", Type: pluginapi.ConfigFieldTypeString, Description: "CPA 管理 API 基址"},
@@ -89,7 +90,12 @@ func applyConfigMap(cfg *xaiquota.Config, m map[string]any) {
 	if m == nil {
 		return
 	}
+	// CPA host "enabled" controls plugin load; functional switch is quota_guard_enabled.
+	// If quota_guard_enabled is absent, fall back to enabled for backward compatibility.
 	if v, ok := asBool(m["enabled"]); ok {
+		cfg.Enabled = v
+	}
+	if v, ok := asBool(m["quota_guard_enabled"]); ok {
 		cfg.Enabled = v
 	}
 	if v, ok := asFloat(m["tick_seconds"]); ok && v > 0 {
