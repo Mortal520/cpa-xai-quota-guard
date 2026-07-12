@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+- 主动巡查(Patrol)：全量探测所有启用的xAI凭证，自动删除403/401/402死号
+- 直接读取auth file JSON提取access_token，绕过CPA round-robin直接probe上游
+- 已禁用凭证不巡查
+- 不加任何筛选条件(failed>0等)，全量巡查所有启用凭证
+- patrol配置字段：patrol_enabled/patrol_interval/patrol_timeout/patrol_batch_size/patrol_auth_dir
+- tickerLoop集成定时巡查调度
+- Patrol UI：进度条、实时日志、存活/删除/错误计数
+- API路由：patrol(启动)/patrol/status(状态)/patrol/stop(停止)
+- 删除日志记录patrol来源标识
+
 ## 0.1.27
 
 - auth-files List：TTL 缓存 + 失败/空响应 sticky 回落
