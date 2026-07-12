@@ -1,6 +1,8 @@
 # Changelog
 
 ## 0.2.23
+- **开源交付**：根目录 `LICENSE`（MIT）；README 协议徽章与「开源协议」章节；界面预览截图区（`docs/screenshots/`）
+- **CI**：正式启用多架构 workflow（linux/darwin/windows × amd64/arm64）+ tag 触发 Release zip
 
 - **吸收 grok-panel 分类能力**（参考 TizenryA/cpa-plugin-grok-panel，MIT）
   - Free / Super / Heavy 启发式分类（note/label/prefix/tag/account_type + auth JSON 字段）

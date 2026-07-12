@@ -1,6 +1,22 @@
 # cpa-xai-quota-guard
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Version](https://img.shields.io/badge/version-0.2.23-blue.svg)](./CHANGELOG.md)
+[![CI](https://github.com/Mortal520/cpa-xai-quota-guard/actions/workflows/build.yml/badge.svg)](https://github.com/Mortal520/cpa-xai-quota-guard/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/Mortal520/cpa-xai-quota-guard?include_prereleases)](https://github.com/Mortal520/cpa-xai-quota-guard/releases)
+
 CLIProxyAPI **原生 Go 插件**（当前版本 **0.2.23**）：仅针对 **xAI** 登录凭证做额度/死号管控、主动巡查、管理 UI 与用量统计。
+
+
+## 界面预览
+
+管理页示意（矢量占位；可用真实脱敏 PNG 替换，见 [docs/screenshots/README.md](./docs/screenshots/README.md)）：
+
+| 状态栏 / 额度 | 主动巡查 | 账号状态 |
+|---------------|----------|----------|
+| ![状态栏](./docs/screenshots/dashboard.svg) | ![巡查](./docs/screenshots/patrol.svg) | ![账号](./docs/screenshots/accounts.svg) |
+
+> 截图请脱敏：勿包含 management key、完整 token、未遮蔽邮箱、代理账号密码。
 
 ## 做什么
 
@@ -194,3 +210,16 @@ docker restart cli-proxy-api
 ## 安全
 
 禁止提交 management key、auth 目录、state 导出、代理账号密码。见仓库根 `AGENTS.md` / 项目安全约定。
+
+## 开源协议
+
+本项目以 **[MIT License](./LICENSE)** 发布。
+
+- 你可以自由使用、复制、修改、合并、发布、分发、再许可与销售
+- 需保留版权声明与许可证文本
+- 软件按「现状」提供，作者不承担任何担保责任
+
+第三方参考与归因见 [docs/THIRD_PARTY.md](./docs/THIRD_PARTY.md)（含 [cpa-plugin-grok-panel](https://github.com/TizenryA/cpa-plugin-grok-panel) 等 MIT 项目的思想吸收说明）。
+
+商店元数据 `registry.json` 中 `license` 字段与本仓库 LICENSE 一致为 MIT。
+

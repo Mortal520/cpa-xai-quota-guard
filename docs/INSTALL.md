@@ -156,3 +156,7 @@ docker restart cli-proxy-api   # 或 systemctl restart ...
 | 核心能力 | 面板统计/清理建议 | 额度冷却 + 死号删除 + 巡查 |
 | 配置 | 可近零配置看统计 | 需要 management_url/key 才能操作账号 |
 | 多平台 | Release 六包 | CI 对齐六包（win/arm64 可能缺） |
+
+## 开源协议
+
+MIT，见仓库根目录 [LICENSE](../LICENSE)。界面预览见 [screenshots](./screenshots/)。发版见 [RELEASE.md](./RELEASE.md)。

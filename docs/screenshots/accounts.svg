@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420" role="img" aria-label="accounts table mock">
+  <rect width="960" height="420" rx="16" fill="#0f172a"/>
+  <text x="28" y="40" fill="#e2e8f0" font-family="Segoe UI, sans-serif" font-size="22" font-weight="700">账号状态</text>
+  <text x="28" y="64" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="13">分页固定 · 套餐 / 信号筛选 · 搜索</text>
+  <rect x="28" y="88" width="904" height="36" rx="8" fill="#111827" stroke="#334155"/>
+  <text x="44" y="111" fill="#64748b" font-family="Segoe UI, sans-serif" font-size="12">搜索邮箱 / 信号 / 原因…</text>
+  <rect x="28" y="140" width="904" height="36" rx="6" fill="#1e293b"/>
+  <text x="44" y="163" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12">账号 · 套餐 · 状态 · 信号 · 恢复时间 · 原因</text>
+  <rect x="28" y="184" width="904" height="40" rx="6" fill="#0b1220"/>
+  <text x="44" y="209" fill="#e2e8f0" font-family="Segoe UI, sans-serif" font-size="13">a***@example.com · Free · 启用 · — · — · —</text>
+  <rect x="28" y="232" width="904" height="40" rx="6" fill="#111827"/>
+  <text x="44" y="257" fill="#fde68a" font-family="Segoe UI, sans-serif" font-size="13">b***@example.com · Free · 冷却 · free-usage · +5h · rolling 24h</text>
+  <rect x="28" y="280" width="904" height="40" rx="6" fill="#0b1220"/>
+  <text x="44" y="305" fill="#fca5a5" font-family="Segoe UI, sans-serif" font-size="13">c***@example.com · Free · 冷却 · spending · 待巡查 · 402 credits</text>
+  <rect x="28" y="328" width="904" height="40" rx="6" fill="#111827"/>
+  <text x="44" y="353" fill="#c4b5fd" font-family="Segoe UI, sans-serif" font-size="13">d***@example.com · Super · 启用 · — · — · tier_protected</text>
+  <text x="28" y="400" fill="#64748b" font-family="Segoe UI, sans-serif" font-size="12">第 1 / N 页 · 每页固定条数 · 列表长度不无限叠加</text>
+</svg>

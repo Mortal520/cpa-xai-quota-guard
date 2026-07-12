@@ -9,8 +9,27 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Fetch CLIProxyAPI SDK source
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/router-for-me/CLIProxyAPI ./CLIProxyAPI-src
+          printf '\nreplace github.com/router-for-me/CLIProxyAPI/v7 => ./CLIProxyAPI-src\n' >> go.mod
+          go mod download || true
+      - name: Test
+        run: go test ./internal/xaiquota/ -count=1
+
   build:
     name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,79 +38,132 @@ jobs:
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
-            artifact: cpa-xai-quota-guard.so
+            ext: .so
+            zip_name: cpa-xai-quota-guard_linux_amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            ext: .so
+            zip_name: cpa-xai-quota-guard_linux_arm64
+            cc: aarch64-linux-gnu-gcc
+            install_cc: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            ext: .dylib
+            zip_name: cpa-xai-quota-guard_darwin_amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: .dylib
+            zip_name: cpa-xai-quota-guard_darwin_arm64
           - os: windows-latest
             goos: windows
             goarch: amd64
-            artifact: cpa-xai-quota-guard.dll
+            ext: .dll
+            zip_name: cpa-xai-quota-guard_windows_amd64
+          - os: windows-latest
+            goos: windows
+            goarch: arm64
+            ext: .dll
+            zip_name: cpa-xai-quota-guard_windows_arm64
 
     steps:
-      - name: Checkout plugin
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: false
+
+      - name: Install cross compiler (linux/arm64)
+        if: matrix.install_cc != ''
+        run: ${{ matrix.install_cc }}
 
       - name: Fetch CLIProxyAPI SDK source
         shell: bash
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/router-for-me/CLIProxyAPI ./CLIProxyAPI-src
-          echo "Replaced SDK path: $(pwd)/CLIProxyAPI-src"
-
-      - name: Append replace to go.mod
-        shell: bash
-        run: |
-          set -euo pipefail
           printf '\nreplace github.com/router-for-me/CLIProxyAPI/v7 => ./CLIProxyAPI-src\n' >> go.mod
-          cat go.mod
-
-      - name: Download dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          go mod download 2>&1 | tee download.log
-          go mod tidy 2>&1 | tee -a download.log || true
-
-      - name: Unit tests (no CGO)
-        shell: bash
-        run: |
-          set -euo pipefail
-          go test ./internal/xaiquota/ -count=1 2>&1 | tee test.log
+          go mod download 2>&1 | tee download.log || true
 
       - name: Build c-shared
+        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '1'
-        shell: bash
+          CC: ${{ matrix.cc }}
         run: |
           set -euo pipefail
-          mkdir -p bin
-          go build -buildmode=c-shared -trimpath -o "bin/${{ matrix.artifact }}" . 2>&1 | tee build.log
-          ls -la bin || true
+          mkdir -p bin dist
+          OUT="bin/cpa-xai-quota-guard${{ matrix.ext }}"
+          # Windows arm64 may lack CGO toolchain on runner; allow soft-fail for that matrix only
+          set +e
+          go build -buildmode=c-shared -trimpath -o "$OUT" . 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
+          set -e
+          if [[ $code -ne 0 ]]; then
+            if [[ "${{ matrix.goos }}" == "windows" && "${{ matrix.goarch }}" == "arm64" ]]; then
+              echo "WARN: windows/arm64 build failed (toolchain); skipping artifact"
+              exit 0
+            fi
+            exit $code
+          fi
+          ls -la bin
+          # package zip for CPA plugin-store / manual install
+          # CPA expects plugins/<goos>/<goarch>/<name>.so|dll|dylib
+          STAGE="dist/stage/${{ matrix.goos }}/${{ matrix.goarch }}"
+          mkdir -p "$STAGE"
+          cp -f "$OUT" "$STAGE/cpa-xai-quota-guard${{ matrix.ext }}"
+          (
+            cd dist/stage
+            if command -v zip >/dev/null 2>&1; then
+              zip -r "../${{ matrix.zip_name }}.zip" "${{ matrix.goos }}"
+            else
+              # Windows runners: use PowerShell Compress-Archive via bash fallback
+              powershell.exe -NoProfile -Command "Compress-Archive -Path '${{ matrix.goos }}' -DestinationPath '../${{ matrix.zip_name }}.zip' -Force" || true
+            fi
+          )
+          ls -la dist || true
 
-      - name: Upload artifact
+      - name: Upload library artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: bin/${{ matrix.artifact }}
+          name: lib-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: bin/cpa-xai-quota-guard${{ matrix.ext }}
           if-no-files-found: warn
           retention-days: 30
-          compression-level: '0'
 
-      - name: Upload logs (always)
-        if: always()
+      - name: Upload zip package
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            go.mod
-            download.log
-            test.log
-            build.log
-          if-no-files-found: ignore
-          retention-days: 7
+          name: zip-${{ matrix.zip_name }}
+          path: dist/${{ matrix.zip_name }}.zip
+          if-no-files-found: warn
+          retention-days: 30
+
+  release:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all zip artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: zip-*
+          merge-multiple: true
+      - name: List assets
+        run: find release-assets -type f -print
+      - name: Create / update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/**/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: false

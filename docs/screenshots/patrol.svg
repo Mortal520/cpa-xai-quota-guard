@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420" role="img" aria-label="patrol panel mock">
+  <rect width="960" height="420" rx="16" fill="#0f172a"/>
+  <text x="28" y="40" fill="#e2e8f0" font-family="Segoe UI, sans-serif" font-size="22" font-weight="700">主动巡查 · Patrol</text>
+  <text x="28" y="64" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="13">全量仅扫启用 · 仅复核只扫 plugin_auto 冷却 · 可定时</text>
+  <rect x="28" y="90" width="440" height="160" rx="12" fill="#111827" stroke="#334155"/>
+  <text x="48" y="120" fill="#cbd5e1" font-family="Segoe UI, sans-serif" font-size="14" font-weight="600">定时巡查配置</text>
+  <text x="48" y="150" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="13">周期 60 分钟 · 并发 8 · 模型 grok-4.5</text>
+  <text x="48" y="176" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="13">代理：固定出口（复用会话）· 自动换模：关</text>
+  <rect x="48" y="200" width="120" height="32" rx="8" fill="#22c55e"/>
+  <text x="70" y="221" fill="#052e16" font-family="Segoe UI, sans-serif" font-size="13" font-weight="700">启动巡查</text>
+  <rect x="180" y="200" width="120" height="32" rx="8" fill="#334155"/>
+  <text x="206" y="221" fill="#e2e8f0" font-family="Segoe UI, sans-serif" font-size="13">仅复核</text>
+  <rect x="492" y="90" width="440" height="160" rx="12" fill="#111827" stroke="#334155"/>
+  <text x="512" y="120" fill="#cbd5e1" font-family="Segoe UI, sans-serif" font-size="14" font-weight="600">本轮汇总（单源）</text>
+  <text x="512" y="152" fill="#38bdf8" font-family="Segoe UI, sans-serif" font-size="13">探测 48 · 存活 40 · 冷却 5 · 删除 2 · 跳过 1</text>
+  <text x="512" y="180" fill="#fbbf24" font-family="Segoe UI, sans-serif" font-size="13">HTTP：200 / 429 / 402 / 403 · 异常分桶</text>
+  <text x="512" y="208" fill="#86efac" font-family="Segoe UI, sans-serif" font-size="13">网络重试 ≤3 · region/426 不删</text>
+  <rect x="28" y="270" width="904" height="120" rx="12" fill="#0b1220" stroke="#334155"/>
+  <text x="48" y="302" fill="#e2e8f0" font-family="Segoe UI, sans-serif" font-size="14" font-weight="600">处理日志（被动 + 巡查，持久化）</text>
+  <text x="48" y="332" fill="#94a3b8" font-family="Segoe UI, sans-serif" font-size="12">时间 · 账号 · 来源 · 动作 · 原因</text>
+  <text x="48" y="358" fill="#fca5a5" font-family="Segoe UI, sans-serif" font-size="12">…@example.com · patrol · deleted · 403 permission-denied</text>
+  <text x="48" y="378" fill="#fde68a" font-family="Segoe UI, sans-serif" font-size="12">…@example.com · usage · cooldown · 402 spending-limit</text>
+</svg>
