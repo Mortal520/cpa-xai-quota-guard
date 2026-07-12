@@ -1025,17 +1025,9 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
         <span style="color:var(--warn)">错误: <b id="patrolErrors">0</b></span>
       </div>
     </div>
-    <div id="patrolLog" style="margin-top:.7rem;max-height:320px;overflow-y:auto;font-size:.78rem;display:none">
-      <table style="width:100%;border-collapse:collapse">
-        <thead><tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--border)">
-          <th style="padding:.25rem">时间</th><th>账号</th><th>动作</th><th>HTTP</th><th>原因</th>
-        </tr></thead>
-        <tbody id="patrolLogBody"></tbody>
-      </table>
-    </div>
     <div id="patrolDelHist" style="margin-top:.7rem;display:none">
       <div style="font-weight:600;margin-bottom:.3rem;font-size:.82rem;color:var(--muted)">删除历史（最近 20 条）</div>
-      <div style="max-height:200px;overflow-y:auto;font-size:.78rem">
+      <div style="max-height:180px;overflow-y:auto;font-size:.78rem;border:1px solid var(--border);border-radius:8px">
         <table style="width:100%;border-collapse:collapse">
           <thead><tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--border)">
             <th style="padding:.25rem">时间</th><th>账号</th><th>来源</th><th>原因</th>
@@ -1043,6 +1035,15 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
           <tbody id="patrolDelBody"></tbody>
         </table>
       </div>
+    </div>
+    <div id="patrolLog" style="margin-top:.7rem;max-height:220px;overflow-y:auto;font-size:.78rem;display:none;border:1px solid var(--border);border-radius:8px">
+      <div style="font-weight:600;margin:.35rem .4rem;font-size:.82rem;color:var(--muted)">巡查探测日志</div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--border)">
+          <th style="padding:.25rem">时间</th><th>账号</th><th>动作</th><th>HTTP</th><th>原因</th>
+        </tr></thead>
+        <tbody id="patrolLogBody"></tbody>
+      </table>
     </div>
   </div>
   <div class="card">
@@ -1437,7 +1438,7 @@ function paintStatusBar(d){
       tip.innerHTML = "";
     }
   }
-  renderDelHist(d.delete_history || []);
+  renderDelHist(Array.isArray(d.delete_history) ? d.delete_history : null, {allowEmpty:true});
   // live countdown cells without full re-fetch
   const nowMs = Date.now();
 
@@ -1793,28 +1794,51 @@ async function runTick(){
 })();
 // ===== Delete History (shared renderer, avoids DOM thrash) =====
 var DEL_HIST_FP = "";
-function renderDelHist(items){
+var DEL_HIST_LAST = [];
+function extractDeleteHistory(payload){
+  if(!payload) return null;
+  // api() wraps as {ok,result}; result may be body; body may nest delete_history
+  var body = (payload.result != null) ? payload.result : payload;
+  if(body && Array.isArray(body.delete_history)) return body.delete_history;
+  if(Array.isArray(payload.delete_history)) return payload.delete_history;
+  return null; // null = missing field (do not clear); [] = explicit empty
+}
+function renderDelHist(items, opts){
+  opts = opts || {};
   var dhWrap = document.getElementById("patrolDelHist");
   var dhBody = document.getElementById("patrolDelBody");
   if(!dhWrap || !dhBody) return;
-  if(!items || !items.length){
-    if(dhWrap.style.display !== "none") dhWrap.style.display = "none";
-    if(DEL_HIST_FP){ DEL_HIST_FP = ""; dhBody.innerHTML = ""; }
+  // null/undefined: incomplete payload from patrol poll — keep last good, do not blink
+  if(items == null){
+    if(DEL_HIST_LAST.length){ dhWrap.style.display = ""; }
+    return;
+  }
+  if(!Array.isArray(items)) items = [];
+  if(!items.length){
+    // only clear when caller explicitly allows (state says empty)
+    if(opts.allowEmpty){
+      if(dhWrap.style.display !== "none") dhWrap.style.display = "none";
+      if(DEL_HIST_FP){ DEL_HIST_FP = ""; dhBody.innerHTML = ""; DEL_HIST_LAST = []; }
+    }
     return;
   }
   var fp = items.slice(0,20).map(function(x){
-    return (x.auth_index||x.file_name||"") + ":" + (x.deleted_at_ms||0) + ":" + (x.reason||"").slice(0,40);
+    return (x.auth_index||x.file_name||"") + ":" + (x.deleted_at_ms||0) + ":" + String(x.reason||"").slice(0,40);
   }).join("|");
-  if(fp === DEL_HIST_FP) return; // no change, skip DOM write
+  if(fp === DEL_HIST_FP){
+    dhWrap.style.display = "";
+    return;
+  }
   DEL_HIST_FP = fp;
+  DEL_HIST_LAST = items.slice(0,20);
   dhWrap.style.display = "";
-  dhBody.innerHTML = items.slice(0,20).map(function(x){
-    var src = (x.reason||"").indexOf("patrol:")>=0 ? "巡查" : "额度";
+  dhBody.innerHTML = DEL_HIST_LAST.map(function(x){
+    var src = String(x.reason||"").indexOf("patrol:")>=0 ? "巡查" : "额度";
     return '<tr style="border-bottom:1px solid #f1f5f9">' +
-      '<td style="padding:.2rem">'+fmtTime(x.deleted_at_ms)+'</td>' +
-      '<td>'+esc(x.account||x.file_name||x.auth_index||"?")+'</td>' +
-      '<td style="font-weight:600">'+src+'</td>' +
-      '<td style="color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis">'+esc(x.reason||"")+'</td>' +
+      '<td style="padding:.2rem;white-space:nowrap">'+fmtTime(x.deleted_at_ms)+'</td>' +
+      '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(x.account||x.file_name||x.auth_index||"?")+'</td>' +
+      '<td style="font-weight:600;white-space:nowrap">'+src+'</td>' +
+      '<td style="color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(x.reason||"")+'</td>' +
     '</tr>';
   }).join("");
 }
@@ -1868,17 +1892,22 @@ function paintPatrol(p, r){
   }
   var log = p.recent_log || [];
   var tbody = document.getElementById("patrolLogBody");
-  tbody.innerHTML = log.map(function(e){
-    var color = e.action === "deleted" ? "var(--err)" : e.action === "error" ? "var(--warn)" : e.action === "cooldown_skip" ? "var(--muted)" : "var(--ok)";
-    return '<tr style="border-bottom:1px solid #f1f5f9">' +
-      '<td style="padding:.2rem">'+fmtTime(e.time_ms)+'</td>' +
-      '<td>'+esc(e.account||e.file_name||e.auth_index||"?")+'</td>' +
-      '<td style="color:'+color+';font-weight:600">'+esc(e.action)+'</td>' +
-      '<td>'+(e.http_code||"-")+'</td>' +
-      '<td style="color:var(--muted);max-width:300px;overflow:hidden;text-overflow:ellipsis">'+esc(e.reason||"")+'</td>' +
-    '</tr>';
-  }).join("");
-  renderDelHist((r && r.delete_history) || (p && p.delete_history) || []);
+  var logFp = log.map(function(e){ return (e.auth_index||"")+":"+(e.time_ms||0)+":"+(e.action||"")+":"+(e.http_code||""); }).join("|");
+  if(logFp !== (window._PATROL_LOG_FP||"")){
+    window._PATROL_LOG_FP = logFp;
+    tbody.innerHTML = log.map(function(e){
+      var color = e.action === "deleted" ? "var(--err)" : e.action === "error" ? "var(--warn)" : e.action === "cooldown_skip" ? "var(--muted)" : "var(--ok)";
+      return '<tr style="border-bottom:1px solid #f1f5f9">' +
+        '<td style="padding:.2rem;white-space:nowrap">'+fmtTime(e.time_ms)+'</td>' +
+        '<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.account||e.file_name||e.auth_index||"?")+'</td>' +
+        '<td style="color:'+color+';font-weight:600;white-space:nowrap">'+esc(e.action)+'</td>' +
+        '<td>'+(e.http_code||"-")+'</td>' +
+        '<td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.reason||"")+'</td>' +
+      '</tr>';
+    }).join("");
+  }
+  // delete_history lives on api result body; never pass [] for missing field (blinks hide/show)
+  renderDelHist(extractDeleteHistory(r) || extractDeleteHistory(p));
 }
 async function patrolStart(){
   var btn = document.getElementById("patrolBtn");
