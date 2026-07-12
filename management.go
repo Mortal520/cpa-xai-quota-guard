@@ -71,7 +71,6 @@ func buildManagementRegistration() managementRegistration {
 			{Method: "GET", Path: "/cpa-xai-quota-guard/export", Description: "导出今日用量 JSON"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/toggle", Description: "开关 enabled"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/run", Description: "手动触发恢复扫描"},
-			{Method: "POST", Path: "/cpa-xai-quota-guard/inject", Description: "注入测试事件（429/403/401/402）"},
 		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol", Description: "启动主动巡查(全量探测启用凭证)"},
 		{Method: "GET", Path: "/cpa-xai-quota-guard/patrol/status", Description: "巡查状态与日志"},
 		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/stop", Description: "停止当前巡查"},
@@ -172,8 +171,6 @@ func dispatchAPI(req managementRequest, action string) ([]byte, error) {
 		return toggleResponse(req)
 	case "run":
 		return runResponse()
-	case "inject":
-		return injectResponse(req)
 	case "patrol":
 		return patrolResponse(req)
 	case "patrol/status":
@@ -1072,20 +1069,6 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
     </div>
     <div class="muted" style="margin-top:.4rem;font-size:.8rem" id="patrolCfgHint">配置加载中…</div>
   </div>
-  <div class="card">
-    <div style="font-weight:600;margin-bottom:.5rem">注入测试（需真实 auth_index）</div>
-    <div class="row">
-      <input id="injAuth" placeholder="auth_index" style="flex:1;min-width:180px">
-      <select id="injKind">
-        <option value="free_usage">429 free-usage（冷却）</option>
-        <option value="permission_denied">403 permission-denied（删除）</option>
-        <option value="invalid_credentials">401 invalid credentials（删除）</option>
-        <option value="spending_limit">402 spending-limit（删除）</option>
-      </select>
-      <button class="warn" onclick="inject()">注入并处理</button>
-    </div>
-        <div class="muted" style="margin-top:.4rem;font-size:.8rem">403 会调用 DELETE auth-files；请确认目标账号。429 会按 24h 滚动窗口冷却（受 max_reset_seconds 限制）。</div>
-  </div>
   <div class="card" id="patrolCard">
     <div class="row" style="justify-content:space-between;gap:.5rem;margin-bottom:.35rem">
       <div style="font-weight:700">主动巡查</div>
@@ -1821,7 +1804,7 @@ async function savePatrolConfig(){
   var ph = document.getElementById("patrolCfgHint");
   if(ph) ph.textContent = "保存中…";
   try {
-    var r = await api("patrol/config", {method:"POST", body: JSON.stringify(body)});
+    var r = await api("patrol/config", {method:"POST", body: body});
     if(!r || !r.ok){
       if(ph) ph.textContent = "保存失败: " + JSON.stringify(r&&r.error||r);
       alert("巡查配置保存失败: " + JSON.stringify(r&&r.error||r));
@@ -1880,15 +1863,6 @@ async function runTick(){
   const r = await api("run", {method:"POST"});
   if(!r || !r.ok){ alert("扫描失败"); return; }
   setTimeout(loadState, 300);
-}
-async function inject(){
-  const auth = document.getElementById("injAuth").value.trim();
-  const kind = document.getElementById("injKind").value;
-  if(!auth){ alert("请填写 auth_index"); return; }
-  if((kind==="permission_denied"||kind==="invalid_credentials"||kind==="spending_limit") && !confirm("确认对 "+auth+" 注入删除类错误？不可撤销")) return;
-  const r = await api("inject", {method:"POST", body:{auth_index: auth, kind: kind}});
-  if(!r || !r.ok){ alert("注入失败: "+JSON.stringify(r&&r.error||r)); return; }
-  setTimeout(loadState, 400);
 }
 (function init(){
   const k = mgmtKey();
