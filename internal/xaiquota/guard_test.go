@@ -243,7 +243,7 @@ func TestGuardDeletesInvalidCredentials401(t *testing.T) {
 	}
 }
 
-func TestGuardDeletesSpendingLimit402(t *testing.T) {
+func TestGuardCooldownsSpendingLimit402(t *testing.T) {
 	auth := newMemAuth(AuthFile{AuthIndex: "x402", Name: "xai-402.json", Provider: "xai", Disabled: false})
 	g, err := NewGuard(Config{
 		Enabled:       true,
@@ -261,7 +261,17 @@ func TestGuardDeletesSpendingLimit402(t *testing.T) {
 		Body:       `{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription."}`,
 	})
 	files, _ := auth.List()
-	if len(files) != 0 {
-		t.Fatalf("expected deleted, still have %#v", files)
+	if len(files) != 1 {
+		t.Fatalf("expected keep file (cooldown), got %#v", files)
+	}
+	if !files[0].Disabled {
+		t.Fatal("expected plugin_auto disabled for 402 spending-limit")
+	}
+	rec := g.storeGet("x402")
+	if rec == nil || rec.State != StateAutoDisabled || rec.DisableSource != SourcePluginAuto {
+		t.Fatalf("expected auto_disabled plugin_auto, got %#v", rec)
+	}
+	if rec.Signal != "spending_limit" {
+		t.Fatalf("signal=%q want spending_limit", rec.Signal)
 	}
 }

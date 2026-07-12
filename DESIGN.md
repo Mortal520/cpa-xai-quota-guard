@@ -1,15 +1,16 @@
 # cpa-xai-quota-guard 设计文档
 
 > xAI 专用额度/死号管控插件（CLIProxyAPI native Go）  
-> 当前实现版本：**0.2.1**（以 `main.go` 中 `pluginVer` 为准）
+> 当前实现版本：**0.2.3**（以 `main.go` 中 `pluginVer` 为准）
 
 ## 1. 目标
 
 仅针对 **xAI** 登录凭证：
 
-1. 明确的 **短时免费额度用尽（rolling 24h）** → 临时禁用，到期自动恢复  
-2. 明确的 **死号**（权限拒绝 / 凭证失效 / 订阅积分耗尽）→ 删除凭证  
-3. 用户手动禁用永不自动启用；状态标签持久化  
+1. 明确的 **短时免费额度用尽（rolling 24h / 429）** → 临时禁用，到期自动恢复  
+2. 明确的 **积分/订阅 spending-limit（402）** → 临时禁用（signal=`spending_limit`），与 429 区分；巡查探测可用后启用  
+3. 明确的 **死号**（权限拒绝 403 / 凭证失效 401）→ 删除凭证  
+4. 用户手动禁用永不自动启用；状态标签持久化  
 
 ## 2. 硬性约束
 
@@ -21,7 +22,7 @@
 6. 仅恢复本插件自动禁用的文件。  
 7. 用户手动禁用永远不会被自动启用。  
 8. 状态标签：`plugin_auto` / `user_manual`，持久化到 `state_path`。  
-9. 401/402/403 死号路径 → **DELETE**，不进冷却队列。  
+9. 401/403 死号路径 → **DELETE**；402 spending-limit → **plugin_auto 冷却**（非删除）。  
 
 ## 3. 与 CPAMP 的对齐
 
@@ -44,8 +45,8 @@
 |------|-------|----------------|
 | provider | codex | **仅 xai** |
 | 主冷却信号 | `usage_limit_reached` / `x-codex-*` | **429 + free-usage-exhausted（rolling 24h）** |
-| 死号 | 视实现 | **403 / 401 / 402 明确码 → DELETE** |
-| 月度/账户额度 | 部分 usage_limit | **402 spending-limit 删除；不冷却** |
+| 死号 | 视实现 | **403 / 401 明确码 → DELETE** |
+| 积分/订阅额度 | 部分 usage_limit | **402 spending-limit → 冷却（spending_limit），巡查恢复** |
 
 ### 4.2 冷却匹配（429 short-window）
 
@@ -84,11 +85,14 @@
 Invalid or expired credentials (auth_kind=bearer, ... reason=no auth context)
 ```
 
-**删除 — HTTP 402：**
+**冷却 — HTTP 402（与 429 区分，signal=`spending_limit`）：**
 
 ```json
 {"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription. ..."}
 ```
+
+- **不删除**；`plugin_auto` 软冷却（默认 ~24h 软上限，受 `max_reset_seconds` 约束）
+- 定时/手动巡查**会探测**此类冷却号；probe 得到 200 或 429 free-usage 视为可恢复并启用
 
 **忽略 — HTTP 200 流式取消：**
 
@@ -110,7 +114,11 @@ context canceled  + Content-Type: text/event-stream
 
 - 403 + `permission-denied`  
 - 401 + invalid/expired credentials / no auth context / invalid_grant revoked  
-- 402 + spending-limit / run out of credits / personal-team-blocked  
+
+**冷却信号（402 spending，与 429 独立）：**
+
+- 402 + `personal-team-blocked:spending-limit` / run out of credits / need a Grok subscription  
+- 状态 `signal=spending_limit`；巡查候选包含此类 disabled 账号  
 
 **永不处理：**
 
@@ -211,7 +219,7 @@ dead credential (401/402/403 白名单)
 ## 10. 假设与局限
 
 1. free-usage 滚动窗口以 xAI 文案与生产样例为准；无 `Retry-After` 时用 24h 默认。  
-2. 402 与 429 free-usage **不得混淆**：402 删除，429 冷却。  
+2. 402 与 429 free-usage **不得混淆**：均为冷却，但 **signal/Reason/恢复路径不同**（429 到点 tick；402 以巡查探测为主、tick 软上限为辅）。  
 3. 凭证数依赖 management `auth-files`；主机繁忙时可能瞬时失败 → sticky 掩盖，非实时强一致。  
 4. `include_unobserved_quota_est=true` 时总额度为 **估**，未观测账号按默认 1M 计。  
 5. 今日已用依赖 CPA 是否在 usage 事件中带 token Detail；缺 Detail 时可能偏低（可用 CPAMP 回补地板）。  
@@ -224,7 +232,8 @@ dead credential (401/402/403 白名单)
 | 初版 | 通用 429 rate-limit + 所有权模型 |
 | 2026-07-11 | 生产 429 free-usage / 403 DELETE；ManagementResponse UI |
 | 0.1.22 | 401 invalid credentials DELETE |
-| 0.1.23 | 402 spending-limit DELETE |
+| 0.1.23 | 402 spending-limit DELETE（历史；0.2.3 起改为冷却） |
+| 0.2.3 | 402 spending-limit → plugin_auto 冷却 + 巡查恢复；与 429 区分 |
 | 0.1.24–0.1.26 | focus 视图与 UI 性能 |
 | **0.1.27** | inventory sticky，凭证数不闪 0 |
 
@@ -235,7 +244,7 @@ dead credential (401/402/403 白名单)
 - commit 前扫描 staged diff  
 ## 主动巡查 (Patrol)
 
-- 目标：全量探测**当前启用**的 xAI 凭证，删除不可恢复死号（403/401/402）。
+- 目标：全量探测**当前启用**的 xAI + **spending_limit 冷却号**；删除不可恢复死号（403/401）；402 冷却/恢复。
 - 不巡查 `disabled=true` 的文件；不加 failed/success 筛选。
 - 实现：worker pool + 直读 auth 文件 token + 可选代理；结果写入 `delete_history`（reason 前缀 `patrol:`）。
 - 调度：`tickerLoop` 在 `patrol_enabled && patrol_auth_dir!=""` 时按 `patrol_interval` 触发。

@@ -89,6 +89,47 @@ func MatchShortWindowQuota(in MatchInput) (MatchResult, bool) {
 	}, true
 }
 
+// MatchSpendingLimitQuota maps 402 spending-limit to a plugin_auto cooldown,
+// separate from 429 free-usage (different signal/reason). RecoverAt is a soft
+// upper bound for tick; patrol may re-enable earlier when probe succeeds.
+func MatchSpendingLimitQuota(in MatchInput) (MatchResult, bool) {
+	if !in.Failed {
+		return MatchResult{}, false
+	}
+	if !IsXAIProvider(in.Provider, in.AuthType) {
+		return MatchResult{}, false
+	}
+	if !IsSpendingLimitBlocked(in.StatusCode, in.Body) {
+		return MatchResult{}, false
+	}
+	now := in.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	maxReset := in.MaxResetSeconds
+	if maxReset <= 0 {
+		maxReset = 86400
+	}
+	// Soft ceiling for tick recovery; patrol can re-enable earlier on live 200/429 free-usage.
+	sec := 24 * 3600.0
+	if maxReset > 0 && sec > maxReset {
+		sec = maxReset
+	}
+	recoverAt := now.Add(time.Duration(sec * float64(time.Second)))
+	code := extractErrorCode(in.Body)
+	if code == "" {
+		code = "personal-team-blocked:spending-limit"
+	}
+	waitH := recoverAt.Sub(now).Hours()
+	waitLabel := fmt.Sprintf("%.0fh", waitH)
+	reason := fmt.Sprintf("积分/订阅耗尽(spending-limit)，软冷却约 %s；巡查探测恢复后自动启用 · %s", waitLabel, code)
+	return MatchResult{
+		RecoverAt: recoverAt,
+		Reason:    reason,
+		Signal:    "spending_limit",
+	}, true
+}
+
 // buildHumanReason produces a short Chinese/English-mixed summary for UI.
 func buildHumanReason(body, signal string, recoverAt, now time.Time) string {
 	code := extractErrorCode(body)
@@ -218,8 +259,9 @@ func IsInvalidCredentials(statusCode int, body string) bool {
 	return false
 }
 
-// IsSpendingLimitBlocked reports xAI accounts that are out of credits / blocked by spending limit.
-// These will not recover automatically (unlike free-usage 24h window). Typical: HTTP 402 +
+// IsSpendingLimitBlocked reports xAI accounts out of credits / blocked by spending limit.
+// Policy: temporary plugin_auto disable (NOT delete); distinct from 429 free-usage.
+// Recover is probe-driven during patrol (not pure wall-clock). Typical: HTTP 402 +
 // personal-team-blocked:spending-limit.
 func IsSpendingLimitBlocked(statusCode int, body string) bool {
 	body = strings.TrimSpace(body)
@@ -256,12 +298,9 @@ func IsSpendingLimitBlocked(statusCode int, body string) bool {
 	if !strong {
 		return false
 	}
-	// Prefer 402 Payment Required; also accept explicit body with 0 status.
+	// Prefer 402 Payment Required; accept explicit body when status unknown (0).
+	// Do NOT treat 403/400 as spending-limit (those may be permission/region).
 	if statusCode == http.StatusPaymentRequired || statusCode == 0 {
-		return true
-	}
-	// Some paths may wrap as 403/400 with the same code.
-	if statusCode == http.StatusForbidden || statusCode == http.StatusBadRequest {
 		return true
 	}
 	return false

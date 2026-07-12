@@ -979,7 +979,7 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
   <div class="card" id="patrolCard">
     <div class="row" style="justify-content:space-between;gap:.5rem;margin-bottom:.35rem">
       <div style="font-weight:700">主动巡查</div>
-      <div class="muted" style="font-size:.78rem" id="patrolHint">全量探测所有启用的 xAI 凭证，自动删除 403/401/402 死号</div>
+      <div class="muted" style="font-size:.78rem" id="patrolHint">全量探测启用凭证 + spending-limit 冷却号；403/401 删除，402 禁用并在额度恢复后启用</div>
     </div>
     <div class="row" style="gap:.6rem;flex-wrap:wrap;align-items:center">
       <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem">
@@ -1307,12 +1307,21 @@ function humanReason(a){
   }
   if(/permission-denied|permission_denied/i.test(raw+signal)) return "权限拒绝（将删除账号）";
   if(/invalid or expired credentials|no auth context|invalid_grant|refresh token has been revoked/i.test(raw+signal)) return "凭证失效/已吊销（将删除账号）";
-  if(/spending-limit|run out of credits|personal-team-blocked/i.test(raw+signal)) return "额度/订阅耗尽（将删除账号）";
+  if(/spending-limit|run out of credits|personal-team-blocked|spending_limit/i.test(raw+signal)) return "积分/订阅耗尽（程序冷却，巡查恢复后启用）";
   if(code) return "xAI 限制: " + code;
   if(signal) return signal.replace(/^body\.error\.code=/, "错误码: ");
   if(errText) return errText.slice(0,100);
   if(raw) return raw.slice(0,100);
   return "—";
+}
+function patrolActionLabel(a){
+  if(a==="deleted") return "已删除";
+  if(a==="alive") return "存活";
+  if(a==="error") return "错误";
+  if(a==="cooldown") return "冷却禁用";
+  if(a==="cooldown_skip") return "跳过";
+  if(a==="reenabled") return "已恢复启用";
+  return a||"—";
 }
 function stateTag(st, src, health){
   if(health==="due") return '<span class="tag due">已到点待恢复</span>';
@@ -1875,11 +1884,11 @@ function paintPatrol(p, r){
   if(logFp !== (window._PATROL_LOG_FP||"")){
     window._PATROL_LOG_FP = logFp;
     tbody.innerHTML = log.map(function(e){
-      var color = e.action === "deleted" ? "var(--err)" : e.action === "error" ? "var(--warn)" : e.action === "cooldown_skip" ? "var(--muted)" : "var(--ok)";
+      var color = e.action === "deleted" ? "var(--err)" : e.action === "error" ? "var(--warn)" : (e.action === "cooldown_skip" || e.action === "cooldown") ? "var(--muted)" : e.action === "reenabled" ? "var(--accent)" : "var(--ok)";
       return '<tr style="border-bottom:1px solid #f1f5f9">' +
         '<td style="padding:.2rem;white-space:nowrap">'+fmtTime(e.time_ms)+'</td>' +
         '<td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.account||e.file_name||e.auth_index||"?")+'</td>' +
-        '<td style="color:'+color+';font-weight:600;white-space:nowrap">'+esc(e.action)+'</td>' +
+        '<td style="color:'+color+';font-weight:600;white-space:nowrap">'+esc(patrolActionLabel(e.action))+'</td>' +
         '<td>'+(e.http_code||"-")+'</td>' +
         '<td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.reason||"")+'</td>' +
       '</tr>';

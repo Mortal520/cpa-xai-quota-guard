@@ -130,16 +130,24 @@ func (g *Guard) PatrolSweep() PatrolStatus {
 		return g.PatrolStatus()
 	}
 
-	// Full sweep of enabled xAI only; no failed/success filter.
+	// Full sweep: all enabled xAI, plus plugin_auto spending_limit accounts
+	// (disabled for cooldown but must be re-probed for recovery).
+	// Never include user_manual or 429 free-usage cooldown-only disables here
+	// unless they are spending_limit (signal-gated).
 	candidates := make([]AuthFile, 0, len(files))
 	for _, f := range files {
 		if !IsXAIProvider(f.Provider, "") {
 			continue
 		}
-		if f.Disabled {
+		if !f.Disabled {
+			candidates = append(candidates, f)
 			continue
 		}
-		candidates = append(candidates, f)
+		live := g.storeGet(f.AuthIndex)
+		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
+			live.Owner == Owner && !live.PreDisabled && live.Signal == "spending_limit" {
+			candidates = append(candidates, f)
+		}
 	}
 
 	batchLimit := cfg.PatrolBatchSize
@@ -244,8 +252,10 @@ func (g *Guard) recordProbeResult(r probeResult) {
 		g.patrol.totalDeleted++
 	case "error":
 		g.patrol.totalErrors++
-	case "cooldown_skip":
+	case "cooldown_skip", "cooldown":
 		g.patrol.totalSkipped++
+	case "reenabled":
+		g.patrol.totalAlive++
 	case "alive":
 		g.patrol.totalAlive++
 	default:
@@ -306,17 +316,9 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		}
 	}
 
-	// Skip if currently in plugin_auto cooldown.
+	// Note: spending_limit cooldowns are intentionally re-probed (included in candidates).
+	// Free-usage cooldowns are disabled and not in candidates, so no skip needed here.
 	live := g.storeGet(f.AuthIndex)
-	if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto {
-		return probeResult{
-			authIndex: f.AuthIndex,
-			fileName:  f.Name,
-			account:   f.Account,
-			action:    "cooldown_skip",
-			reason:    "currently in plugin_auto cooldown",
-		}
-	}
 
 	baseURL := strings.TrimRight(strings.TrimSpace(af.BaseURL), "/")
 	if baseURL == "" {
@@ -355,74 +357,140 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 	bodyStr := string(bodyBytes)
 	code := resp.StatusCode
 
-	// 200/429/5xx = alive; 403/401/402 dead-signal = delete.
-	if code == http.StatusOK {
-		return probeResult{
-			authIndex: f.AuthIndex,
-			fileName:  f.Name,
-			account:   f.Account,
-			action:    "alive",
-			reason:    "200 OK",
-			httpCode:  code,
+	// Outcomes:
+	// - 200 / non-dead 5xx: alive; if was spending_limit cooldown → re-enable
+	// - 429 free-usage: alive (quota window); if was spending_limit → re-enable (free tier usable)
+	// - 402 spending-limit: soft-disable (plugin_auto, signal=spending_limit), do NOT delete
+	// - 403/401: delete dead credential
+	reenableIfSpending := func(reason string) probeResult {
+		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
+			live.Signal == "spending_limit" && live.Owner == Owner && !live.PreDisabled {
+			if g.auth != nil {
+				if _, err := g.auth.SetDisabled(f.AuthIndex, false); err != nil {
+					return probeResult{
+						authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+						action: "error", reason: fmt.Sprintf("re-enable failed: %v", err), httpCode: code,
+					}
+				}
+			}
+			_ = g.storeMarkActive(f.AuthIndex)
+			g.logf("info", "patrol 探测恢复，已启用 spending_limit 账号 auth=%s reason=%s", f.AuthIndex, reason)
+			g.NotifyWebhook("patrol_spending_recovered", map[string]any{
+				"auth_index": f.AuthIndex, "file_name": f.Name, "account": f.Account,
+				"http_code": code, "reason": reason,
+			})
+			return probeResult{
+				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+				action: "reenabled", reason: reason, httpCode: code,
+			}
 		}
+		return probeResult{
+			authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+			action: "alive", reason: reason, httpCode: code,
+		}
+	}
+
+	if code == http.StatusOK {
+		return reenableIfSpending("200 OK")
 	}
 	if code == http.StatusTooManyRequests {
+		// 429 free-usage means free tier still works → treat as recovered for spending cooldown
+		return reenableIfSpending("429 rate-limited (free quota window; not spending-limit)")
+	}
+	if IsSpendingLimitBlocked(code, bodyStr) {
+		// Soft-disable only (distinct signal from 429 free-usage).
+		match, ok := MatchSpendingLimitQuota(MatchInput{
+			Provider: "xai", Failed: true, StatusCode: code, Body: bodyStr, Now: time.Now(),
+			MaxResetSeconds: g.Config().MaxResetSeconds,
+		})
+		if !ok {
+			return probeResult{
+				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+				action: "error", reason: "spending-limit body unmatched", httpCode: code,
+			}
+		}
+		// Already under our spending cooldown → extend recover, keep disabled.
+		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
+			live.Signal == "spending_limit" && live.Owner == Owner && !live.PreDisabled {
+			rec := *live
+			rec.RecoverAtMS = match.RecoverAt.UnixMilli()
+			rec.Reason = match.Reason
+			rec.Signal = match.Signal
+			_ = g.storeUpsert(rec)
+			return probeResult{
+				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+				action: "cooldown", reason: "spending-limit still active", httpCode: code,
+			}
+		}
+		// Disable if currently enabled.
+		if g.auth != nil && !f.Disabled {
+			prev, err := g.auth.SetDisabled(f.AuthIndex, true)
+			if err != nil {
+				return probeResult{
+					authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+					action: "error", reason: fmt.Sprintf("disable failed: %v", err), httpCode: code,
+				}
+			}
+			if prev {
+				// External disable → do not own.
+				return probeResult{
+					authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+					action: "cooldown_skip", reason: "already disabled externally", httpCode: code,
+				}
+			}
+		}
+		nowMS := time.Now().UnixMilli()
+		_ = g.storeUpsert(AccountRecord{
+			AuthIndex: f.AuthIndex, FileName: f.Name, Provider: "xai", Account: f.Account,
+			DisableSource: SourcePluginAuto, State: StateAutoDisabled,
+			RecoverAtMS: match.RecoverAt.UnixMilli(), DisabledAtMS: nowMS,
+			PreDisabled: false, Owner: Owner, Reason: match.Reason, Signal: match.Signal,
+		})
+		g.logf("warn", "patrol spending-limit 已禁用 auth=%s recover_at=%s", f.AuthIndex, match.RecoverAt.Format(time.RFC3339))
+		g.NotifyWebhook("patrol_spending_disable", map[string]any{
+			"auth_index": f.AuthIndex, "file_name": f.Name, "account": f.Account,
+			"http_code": code, "recover_at": match.RecoverAt.Format(time.RFC3339),
+		})
 		return probeResult{
-			authIndex: f.AuthIndex,
-			fileName:  f.Name,
-			account:   f.Account,
-			action:    "alive",
-			reason:    "429 rate-limited (quota exhausted, not dead)",
-			httpCode:  code,
+			authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+			action: "cooldown", reason: truncate(bodyStr, 200), httpCode: code,
 		}
 	}
-	if IsPermissionDenied(code, bodyStr) || IsInvalidCredentials(code, bodyStr) || IsSpendingLimitBlocked(code, bodyStr) {
+	if IsPermissionDenied(code, bodyStr) || IsInvalidCredentials(code, bodyStr) {
 		if err := g.auth.Delete(f.AuthIndex); err != nil {
 			return probeResult{
-				authIndex: f.AuthIndex,
-				fileName:  f.Name,
-				account:   f.Account,
-				action:    "error",
-				reason:    fmt.Sprintf("delete failed: %v", err),
-				httpCode:  code,
+				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+				action: "error", reason: fmt.Sprintf("delete failed: %v", err), httpCode: code,
 			}
 		}
 		_ = g.storeRemove(f.AuthIndex)
 		if g.store != nil {
 			_ = g.store.AppendDelete(DeleteEvent{
-				AuthIndex:   f.AuthIndex,
-				FileName:    f.Name,
-				Account:     f.Account,
-				Provider:    "xai",
-				Reason:      fmt.Sprintf("patrol: %s", truncate(bodyStr, 240)),
-				DeletedAtMS: time.Now().UnixMilli(),
+				AuthIndex: f.AuthIndex, FileName: f.Name, Account: f.Account, Provider: "xai",
+				Reason: fmt.Sprintf("patrol: %s", truncate(bodyStr, 240)), DeletedAtMS: time.Now().UnixMilli(),
 			})
 		}
 		g.logf("warn", "patrol 删除死号 auth=%s file=%s code=%d reason=%s", f.AuthIndex, f.Name, code, truncate(bodyStr, 120))
 		g.NotifyWebhook("patrol_dead_credential_delete", map[string]any{
-			"auth_index": f.AuthIndex,
-			"file_name":  f.Name,
-			"account":    f.Account,
-			"http_code":  code,
-			"reason":     truncate(bodyStr, 160),
+			"auth_index": f.AuthIndex, "file_name": f.Name, "account": f.Account,
+			"http_code": code, "reason": truncate(bodyStr, 160),
 		})
 		return probeResult{
-			authIndex: f.AuthIndex,
-			fileName:  f.Name,
-			account:   f.Account,
-			action:    "deleted",
-			reason:    truncate(bodyStr, 200),
-			httpCode:  code,
+			authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+			action: "deleted", reason: truncate(bodyStr, 200), httpCode: code,
 		}
 	}
 
+	// Other codes: if probing a spending cooldown account, keep disabled (not recovered yet).
+	if live != nil && live.State == StateAutoDisabled && live.Signal == "spending_limit" {
+		return probeResult{
+			authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+			action: "cooldown", reason: fmt.Sprintf("HTTP %d (spending cooldown not recovered)", code), httpCode: code,
+		}
+	}
 	return probeResult{
-		authIndex: f.AuthIndex,
-		fileName:  f.Name,
-		account:   f.Account,
-		action:    "alive",
-		reason:    fmt.Sprintf("HTTP %d (not a dead-credential signal)", code),
-		httpCode:  code,
+		authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+		action: "alive", reason: fmt.Sprintf("HTTP %d (not a dead-credential signal)", code), httpCode: code,
 	}
 }
 

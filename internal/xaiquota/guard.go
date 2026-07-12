@@ -249,23 +249,30 @@ func (g *Guard) HandleUsage(ev UsageEvent) {
 	if authIndex == "" {
 		return
 	}
-	// Dead credentials: 403 permission-denied / 401 invalid / 402 spending-limit → delete immediately.
-	if IsPermissionDenied(ev.StatusCode, ev.Body) || IsInvalidCredentials(ev.StatusCode, ev.Body) || IsSpendingLimitBlocked(ev.StatusCode, ev.Body) {
+	// Dead credentials: 403 permission-denied / 401 invalid → delete immediately.
+	// 402 spending-limit is NOT deleted: plugin_auto soft-disable + patrol re-probe.
+	if IsPermissionDenied(ev.StatusCode, ev.Body) || IsInvalidCredentials(ev.StatusCode, ev.Body) {
 		g.deleteForDeadCredential(authIndex, ev)
 		return
 	}
 
 	headers := headerFromMap(ev.ResponseHeaders)
-	match, ok := MatchShortWindowQuota(MatchInput{
+	now := time.Now()
+	baseIn := MatchInput{
 		Provider:        ev.Provider,
 		AuthType:        ev.AuthType,
 		Failed:          true,
 		StatusCode:      ev.StatusCode,
 		Body:            ev.Body,
 		ResponseHeaders: headers,
-		Now:             time.Now(),
+		Now:             now,
 		MaxResetSeconds: cfg.MaxResetSeconds,
-	})
+	}
+	// Prefer explicit spending-limit path (distinct from 429 free-usage).
+	match, ok := MatchSpendingLimitQuota(baseIn)
+	if !ok {
+		match, ok = MatchShortWindowQuota(baseIn)
+	}
 	if !ok {
 		// Still capture free-usage actual/limit if present.
 		if actual, limit, pok := ParseFreeUsageTokens(ev.Body); pok {
@@ -398,7 +405,7 @@ func (g *Guard) disableForMatch(authIndex string, ev UsageEvent, match MatchResu
 		g.logf("error", "写状态失败 auth=%s: %v", authIndex, err)
 		return
 	}
-	g.logf("warn", "xAI 短时额度耗尽，已禁用 auth=%s file=%s recover_at=%s signal=%s",
+	g.logf("warn", "xAI 额度限制已禁用 auth=%s file=%s recover_at=%s signal=%s",
 		authIndex, current.Name, match.RecoverAt.Format(time.RFC3339), match.Signal)
 	g.NotifyWebhook("quota_cooldown", map[string]any{
 		"auth_index": authIndex,

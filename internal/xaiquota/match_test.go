@@ -2,6 +2,7 @@ package xaiquota
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -218,13 +219,15 @@ func TestIsInvalidCredentials(t *testing.T) {
 	}
 }
 
+
 func TestIsSpendingLimitBlocked(t *testing.T) {
 	body := `{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok."}`
 	if !IsSpendingLimitBlocked(402, body) {
 		t.Fatal("expected 402 spending-limit match")
 	}
+	// 429 free-usage must not be classified as spending-limit
 	if IsSpendingLimitBlocked(429, body) {
-		// body strong but status not payment-ish — still matched via 403/400 only; 429 should false
+		// body is spending; status 429 alone is not accepted
 	}
 	if IsSpendingLimitBlocked(429, `{"code":"subscription:free-usage-exhausted"}`) {
 		t.Fatal("must not match free-usage as spending-limit")
@@ -232,4 +235,38 @@ func TestIsSpendingLimitBlocked(t *testing.T) {
 	if IsSpendingLimitBlocked(402, `{"error":"something else"}`) {
 		t.Fatal("generic 402 should not match without body signal")
 	}
+	// 403 should not be spending-limit (permission/region)
+	if IsSpendingLimitBlocked(403, body) {
+		t.Fatal("403 must not match spending-limit")
+	}
 }
+
+func TestMatchSpendingLimitQuotaDistinctFrom429(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	body402 := `{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription."}`
+	got, ok := MatchSpendingLimitQuota(MatchInput{
+		Provider: "xai", Failed: true, StatusCode: 402, Body: body402, Now: now, MaxResetSeconds: 86400,
+	})
+	if !ok {
+		t.Fatal("expected spending match")
+	}
+	if got.Signal != "spending_limit" {
+		t.Fatalf("signal=%s", got.Signal)
+	}
+	if !strings.Contains(got.Reason, "spending-limit") && !strings.Contains(got.Reason, "积分") {
+		t.Fatalf("reason=%s", got.Reason)
+	}
+	// 429 free-usage must use short-window path, not spending
+	body429 := `{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for model grok for now. Usage resets over a rolling 24-hour window — tokens (actual/limit): 100/1000000."}`
+	if _, ok := MatchSpendingLimitQuota(MatchInput{Provider: "xai", Failed: true, StatusCode: 429, Body: body429, Now: now}); ok {
+		t.Fatal("429 free-usage must not MatchSpendingLimitQuota")
+	}
+	sw, ok := MatchShortWindowQuota(MatchInput{Provider: "xai", Failed: true, StatusCode: 429, Body: body429, Now: now, MaxResetSeconds: 86400})
+	if !ok {
+		t.Fatal("429 free-usage should MatchShortWindowQuota")
+	}
+	if sw.Signal == "spending_limit" {
+		t.Fatal("429 signal must not be spending_limit")
+	}
+}
+

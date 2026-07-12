@@ -1,18 +1,19 @@
 # cpa-xai-quota-guard
 
-CLIProxyAPI **原生 Go 插件**（当前版本 **0.2.1**）：仅针对 **xAI** 登录凭证做额度/死号管控、主动巡查，并提供管理 UI 与用量统计。
+CLIProxyAPI **原生 Go 插件**（当前版本 **0.2.3**）：仅针对 **xAI** 登录凭证做额度/死号管控、主动巡查，并提供管理 UI 与用量统计。
 
 ## 做什么
 
 1. 监听 `usage.handle`（成功计用量；失败按规则处理）
 2. **仅** `provider=xai`
 3. **HTTP 429 + `subscription:free-usage-exhausted`（滚动 24h）** → 临时禁用（`plugin_auto`），到期自动恢复
-4. **403 permission-denied / 401 invalid credentials / 402 spending-limit** → **DELETE** 凭证（不可恢复）
-5. 状态标签持久化：`plugin_auto` / `user_manual`
-6. ticker 到期后**只恢复**本插件自动禁用的账号
-7. 用户手动禁用永不自动启用
-8. **主动巡查 (Patrol)**：定时/手动全量探测**已启用** xAI 凭证，删除 403/401/402 死号
-9. 管理页：状态栏、巡查配置+操作合并卡片、删除历史、账号表分页
+4. **403 permission-denied / 401 invalid credentials** → **DELETE** 凭证（不可恢复）
+5. **402 + personal-team-blocked:spending-limit** → `plugin_auto` 冷却禁用（signal=`spending_limit`），**与 429 free-usage 区分**；巡查探测恢复后自动启用
+6. 状态标签持久化：`plugin_auto` / `user_manual`
+7. ticker 到期后**只恢复**本插件自动禁用的账号（含 spending 软上限）
+8. 用户手动禁用永不自动启用
+9. **主动巡查 (Patrol)**：全量探测**已启用** xAI + **spending_limit 冷却号**；403/401 删除，402 冷却/延长，200/429 恢复 spending 号
+10. 管理页：状态栏、巡查配置+操作合并卡片、删除历史、账号表分页
 
 ## 明确不做
 
@@ -20,7 +21,8 @@ CLIProxyAPI **原生 Go 插件**（当前版本 **0.2.1**）：仅针对 **xAI**
 - 不处理网络错误、`context canceled`、HTTP 200 流式中断、5xx 等非业务额度错误
 - **不照搬** Codex 的 `usage_limit_reached` / `x-codex-*` 窗口逻辑
 - 时间解析失败时 **不禁用**（记日志，静默跳过）
-- 已禁用凭证**不巡查**；巡查不加 `failed>0 && success==0` 筛选（全量启用凭证）
+- 普通已禁用凭证**不巡查**；例外：plugin_auto + signal=spending_limit 必须再探测以恢复
+- 巡查不加 `failed>0 && success==0` 筛选（全量启用凭证）
 
 ## 错误处理矩阵
 
@@ -29,7 +31,7 @@ CLIProxyAPI **原生 Go 插件**（当前版本 **0.2.1**）：仅针对 **xAI**
 | 免费额度用尽 | 429 + free-usage-exhausted / rolling 24h | `plugin_auto` 冷却，默认约 24h 内到点恢复 |
 | 权限拒绝 | 403 + permission-denied | DELETE auth-files |
 | 凭证失效 | 401 + invalid/expired / no auth context 等 | DELETE |
-| 订阅/积分耗尽 | 402 + spending-limit / run out of credits | DELETE |
+| 订阅/积分耗尽 | 402 + spending-limit / run out of credits | `plugin_auto` 冷却（signal=`spending_limit`）；巡查探测恢复后启用 |
 | 客户端取消 | 200 SSE + `context canceled` | **忽略** |
 | 其它 4xx/5xx/网络 | — | **忽略** |
 

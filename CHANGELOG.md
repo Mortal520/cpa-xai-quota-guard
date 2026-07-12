@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3
+
+- 402 spending-limit: 改为 plugin_auto 禁用（signal=`spending_limit`），不再 DELETE
+- 与 429 free-usage 区分：不同 Match 路径、Reason/Signal 不同
+- 巡查会纳入 spending_limit 冷却账号并探测；200/429 视为可恢复并自动启用
+- 403/401 仍删除；IsSpendingLimit 仅接受 HTTP 402/0
 ## 0.2.1
 
 - 配置写回：UI 开关/巡查配置 `GET+merge+PUT` 持久化到 CPA plugin config
