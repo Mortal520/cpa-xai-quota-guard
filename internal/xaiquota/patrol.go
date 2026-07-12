@@ -411,7 +411,8 @@ func (g *Guard) PatrolStop() {
 	g.patrol.mu.Unlock()
 }
 
-// PatrolRunOnce triggers a manual sweep if not already running.
+// PatrolRunOnce triggers an async manual sweep if not already running.
+// Returns current status immediately; the sweep runs in a goroutine.
 func (g *Guard) PatrolRunOnce() PatrolStatus {
 	g.mu.Lock()
 	if g.patrol.running {
@@ -419,5 +420,6 @@ func (g *Guard) PatrolRunOnce() PatrolStatus {
 		return g.PatrolStatus()
 	}
 	g.mu.Unlock()
-	return g.PatrolSweep()
+	go g.PatrolSweep()
+	return g.PatrolStatus()
 }

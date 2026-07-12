@@ -33,7 +33,8 @@ type Config struct {
 	PatrolInterval  float64
 	PatrolTimeout   float64
 	PatrolBatchSize int
-	PatrolAuthDir   string
+	PatrolAuthDir    string
+	PatrolProxyURL  string
 }
 
 // Defaults returns safe defaults. enabled=false until configured.
