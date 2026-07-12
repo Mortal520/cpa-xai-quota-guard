@@ -78,13 +78,19 @@ type AuthFileLookup interface {
 
 // AuthFile is the management API subset we need.
 type AuthFile struct {
-	AuthIndex string
-	Name      string
-	Provider  string
-	Account   string
-	Disabled  bool
-	Success   int64
-	Failed    int64
+	AuthIndex   string
+	Name        string
+	Provider    string
+	Account     string
+	Disabled    bool
+	Success     int64
+	Failed      int64
+	// Optional metadata for Free/Super/Heavy classification (from CPA auth-files list).
+	Note        string
+	Label       string
+	Prefix      string
+	Tag         string
+	AccountType string
 }
 
 // Logger writes plugin logs.

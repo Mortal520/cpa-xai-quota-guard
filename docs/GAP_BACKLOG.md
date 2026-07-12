@@ -59,3 +59,14 @@
 1. **0.2.20**：signal UI + 复核说明 + 单测补齐 + 首轮巡查延迟可配  
 2. **0.2.21**：处理日志筛选 + 账号搜索过滤（已落地）  
 3. **0.3.0**：结构拆分与向导  
+
+
+## 参考吸收：TizenryA/cpa-plugin-grok-panel
+
+| 能力 | 吸收策略 |
+|------|----------|
+| Free/Super/Heavy 分类 | **0.2.23** 元数据启发式 `ClassifyAuthTier`（note/label/prefix/JSON） |
+| Super/Heavy 保护 | UI 标记 `tier_protected`；默认不自动误清（删除仍仅真 401/403 白名单） |
+| 健康检查/连续失败阈值 | 已有巡查+被动矩阵，不照搬「仅 runtime status」探针 |
+| 主题/图表/商店 registry | 0.3.x：主题与进度条美化；registry 可选 |
+| 面板零配置 host.auth | 我们走 management API；保持现网兼容 |

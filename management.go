@@ -320,6 +320,7 @@ func stateResponse(req managementRequest) ([]byte, error) {
 	byIndex := map[string]xaiquota.AuthFile{}
 	inCPA := map[string]bool{}
 	xaiTotal, xaiEnabled, xaiDisabled := 0, 0, 0
+	tierFreeN, tierSuperN, tierHeavyN, tierUnknownN := 0, 0, 0, 0
 	var successSum, failedSum int64
 	for _, f := range inv {
 		if !xaiquota.IsXAIProvider(f.Provider, "") {
@@ -393,6 +394,17 @@ func stateResponse(req managementRequest) ([]byte, error) {
 		f := byIndex[k]
 		rec, hasRec := tracked[k]
 		u := usageByAuth[k]
+		tierCl := xaiquota.ClassifyAuthTier(f, nil)
+		switch tierCl.Tier {
+		case xaiquota.TierHeavy:
+			tierHeavyN++
+		case xaiquota.TierSuper:
+			tierSuperN++
+		case xaiquota.TierFree:
+			tierFreeN++
+		default:
+			tierUnknownN++
+		}
 		item := map[string]any{
 			"auth_index":     f.AuthIndex,
 			"file_name":      firstNonEmpty(f.Name, rec.FileName),
@@ -410,6 +422,10 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			"last_tokens":    u.LastTokens,
 			"last_at_ms":     u.LastAtMS,
 			"last_failed":    u.LastFailed,
+			"tier":           tierCl.Tier,
+			"tier_source":    tierCl.Source,
+			"tier_detail":    tierCl.Detail,
+			"tier_protected": xaiquota.IsProtectedTier(tierCl.Tier, nil),
 		}
 		if !inCPA[k] {
 			item["in_inventory"] = false
@@ -593,6 +609,10 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			"recover_due":      dueN,
 			"rolling_over":     overN,
 			"cpa_disabled":     cpaDisabledN,
+			"tier_free":        tierFreeN,
+			"tier_super":       tierSuperN,
+			"tier_heavy":       tierHeavyN,
+			"tier_unknown":     tierUnknownN,
 			"hot_total":        hotTotal,
 			"hot_shown":        hotShown,
 			"hot_hidden":       hotHidden,
@@ -1215,7 +1235,7 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
           <th style="width:8%">码</th>
           <th>说明</th>
         </tr></thead>
-        <tbody id="actionLogBody"><tr><td colspan="6" class="muted" style="padding:.5rem">加载中…</td></tr></tbody>
+        <tbody id="actionLogBody"><tr><td colspan="7" class="muted" style="padding:.5rem">加载中…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1231,6 +1251,9 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
         <option value="auto">自动停用</option>
         <option value="sig_free">信号:429免费额度</option>
         <option value="sig_spending">信号:402积分</option>
+        <option value="tier_free">套餐:Free</option>
+        <option value="tier_super">套餐:Super</option>
+        <option value="tier_heavy">套餐:Heavy</option>
         <option value="due">已到点</option>
         <option value="manual">用户手动</option>
         <option value="hot">今日有用量</option>
@@ -1251,8 +1274,8 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
     </div>
     <div class="acc-table-wrap">
       <table class="acc">
-        <thead><tr><th style="min-width:150px">账号</th><th style="min-width:100px">状态</th><th style="min-width:100px">信号</th><th style="min-width:120px">恢复</th><th style="min-width:140px">今日用量</th><th style="min-width:170px">原因 / 说明</th></tr></thead>
-        <tbody id="accBody"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+        <thead><tr><th style="min-width:150px">账号</th><th style="min-width:70px">套餐</th><th style="min-width:100px">状态</th><th style="min-width:100px">信号</th><th style="min-width:120px">恢复</th><th style="min-width:140px">今日用量</th><th style="min-width:170px">原因 / 说明</th></tr></thead>
+        <tbody id="accBody"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1513,6 +1536,13 @@ function patrolHttpLabel(code){
   };
   return labels[c] || ("HTTP "+c);
 }
+function tierTag(tier, protected){
+  var t = String(tier||"free");
+  var lab = t==="super"?"Super":(t==="heavy"?"Heavy":(t==="free"?"Free":t||"—"));
+  var col = t==="super"?"#7a5f96":(t==="heavy"?"#b07d1a":"var(--muted)");
+  var mark = protected ? " ⚠" : "";
+  return '<span class="tag" style="border-color:'+col+';color:'+col+'" title="'+(protected?"受保护套餐":"可清理候选")+'">'+esc(lab)+mark+'</span>';
+}
 function signalKind(sig){
   const s = String(sig||"");
   if(!s) return "";
@@ -1570,8 +1600,15 @@ function paintStatusBar(d){
   set("sXaiTotal", xaiN);
   const split = document.getElementById("sXaiSplit");
   if(split){
+    var tierBits = [];
+    if(s.tier_free) tierBits.push("F"+s.tier_free);
+    if(s.tier_super) tierBits.push("S"+s.tier_super);
+    if(s.tier_heavy) tierBits.push("H"+s.tier_heavy);
+    if(s.tier_unknown) tierBits.push("?"+s.tier_unknown);
     split.textContent = "启用 " + (m.xai_enabled||0) + " / 停用 " + (m.xai_disabled||0)
-      + " · 跟踪 " + (s.tracked||0) + " · 超限 " + (s.rolling_over||0);
+      + " · 跟踪 " + (s.tracked||0)
+      + (tierBits.length?(" · 套餐 "+tierBits.join("/")):"")
+      + " · 超限 " + (s.rolling_over||0);
   }
   const ts=document.getElementById("sTotalSub");
   if(ts){
@@ -1731,6 +1768,9 @@ function renderAccountTable(){
     if(filter === "auto" && h !== "auto" && h !== "due") return false;
     if(filter === "sig_free" && signalKind(a.signal) !== "free") return false;
     if(filter === "sig_spending" && signalKind(a.signal) !== "spending") return false;
+    if(filter === "tier_free" && String(a.tier||"free") !== "free") return false;
+    if(filter === "tier_super" && String(a.tier||"") !== "super") return false;
+    if(filter === "tier_heavy" && String(a.tier||"") !== "heavy") return false;
     if(filter === "due" && h !== "due") return false;
     if(filter === "manual" && h !== "manual") return false;
     if(filter === "active" && h !== "active") return false;
@@ -1759,7 +1799,7 @@ function renderAccountTable(){
   const body = document.getElementById("accBody");
   if(!body) return;
   const pageFp = filter+"|"+q+"|"+pageSize+"|"+ACC_PAGE+"|"+pageItems.map(function(a){
-    return [a.auth_index,a.state,a.disable_source,a.recover_at_ms,a.used_today,a.reason,a.signal,a.health,a.cpa_disabled].join("~");
+    return [a.auth_index,a.state,a.disable_source,a.recover_at_ms,a.used_today,a.reason,a.signal,a.health,a.cpa_disabled,a.tier,a.tier_protected].join("~");
   }).join("|");
   if(pageFp === (window._ACC_PAGE_FP||"") && body.querySelector("tr[data-auth]")){
     // same page data: only countdown spans update via paintStatusBar path; skip full rewrite
@@ -1767,7 +1807,7 @@ function renderAccountTable(){
   }
   window._ACC_PAGE_FP = pageFp;
   if(!pageItems.length){
-    body.innerHTML = '<tr><td colspan="6" class="muted">无匹配账号（可切换「全部账号」或清空搜索）</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="muted">无匹配账号（可切换「全部账号」或清空搜索）</td></tr>';
     return;
   }
   body.innerHTML = pageItems.map(function(a){
@@ -1791,7 +1831,8 @@ function renderAccountTable(){
     const file = a.file_name || "";
     const recoverMain = a.recover_at_ms ? fmtTime(a.recover_at_ms) : "—";
     return '<tr data-auth="'+esc(a.auth_index||"")+'" class="'+rowClass+'">'+
-      '<td><div class="acc-name">'+esc(name)+'</div>'+(file?'<div class="acc-file">'+esc(file)+'</div>':'')+'</td>'+
+      '<td><div class="acc-name">'+esc(name)+'</div>'+(file?'<div class="acc-file">'+esc(file)+'</div>':'')+(a.tier_protected?'<div class="muted" style="font-size:.7rem">保护</div>':'')+'</td>'+
+      '<td>'+tierTag(a.tier, a.tier_protected)+'</td>'+
       '<td><div class="stack">'+stateTag(a.state,a.disable_source,health)+
         (srcLabel!=="—"?'<div class="muted" style="font-size:.72rem">来源 '+esc(srcLabel)+'</div>':'')+
       '</div></td>'+
@@ -1884,14 +1925,14 @@ async function loadState(){
   const body = document.getElementById("accBody");
   try {
     if(body && !LAST_STATE){
-      body.innerHTML = '<tr><td colspan="6" class="muted">加载中…（view='+view+'）</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" class="muted">加载中…（view='+view+'）</td></tr>';
     }
     const r = await api("state?view="+encodeURIComponent(view), {timeout_ms: 20000});
     if(!r || !r.ok){
       const err = (r&&r.error? (typeof r.error==="string"?r.error:(r.error.message||"error")) : "无响应");
       clearLoadingUI(err);
       if(body){
-        body.innerHTML = '<tr><td colspan="6" class="err">加载失败: '+esc(String(err))+'。请确认 Management Key；选「全部账号」更慢。</td></tr>';
+        body.innerHTML = '<tr><td colspan="7" class="err">加载失败: '+esc(String(err))+'。请确认 Management Key；选「全部账号」更慢。</td></tr>';
       }
       return;
     }
@@ -2285,7 +2326,7 @@ function renderPassiveActions(items){
   if(fp === PASSIVE_ACT_FP) return;
   PASSIVE_ACT_FP = fp;
   if(!list.length){
-    tb.innerHTML = '<tr><td colspan="6" class="muted" style="padding:.5rem">暂无被动处理记录（触发 429/402 冷却或 401/403 删除后会出现）</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="muted" style="padding:.5rem">暂无被动处理记录（触发 429/402 冷却或 401/403 删除后会出现）</td></tr>';
     return;
   }
   tb.innerHTML = list.map(function(x){
@@ -2401,7 +2442,7 @@ function renderActionLog(deletes, actions){
   if(fp === (window.ACTION_LOG_FP||"")) return;
   window.ACTION_LOG_FP = fp;
   if(!filtered.length){
-    tb.innerHTML = '<tr><td colspan="6" class="muted" style="padding:.5rem">无匹配记录（可清空筛选）</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="muted" style="padding:.5rem">无匹配记录（可清空筛选）</td></tr>';
     return;
   }
   tb.innerHTML = filtered.map(function(x){

@@ -34,14 +34,20 @@ func newMgmtAuth(cfg xaiquota.Config) *mgmtAuth {
 }
 
 type mgmtAuthEntry struct {
-	AuthIndex string `json:"auth_index"`
-	Name      string `json:"name"`
-	Provider  string `json:"provider"`
-	Account   string `json:"account"`
-	Email     string `json:"email"`
-	Disabled  bool   `json:"disabled"`
-	Success   int64  `json:"success"`
-	Failed    int64  `json:"failed"`
+	AuthIndex   string `json:"auth_index"`
+	Name        string `json:"name"`
+	Provider    string `json:"provider"`
+	Account     string `json:"account"`
+	Email       string `json:"email"`
+	Disabled    bool   `json:"disabled"`
+	Success     int64  `json:"success"`
+	Failed      int64  `json:"failed"`
+	Note        string `json:"note"`
+	Label       string `json:"label"`
+	Prefix      string `json:"prefix"`
+	Tag         string `json:"tag"`
+	AccountType string `json:"account_type"`
+	Type        string `json:"type"`
 }
 
 // Short-lived cache so state/health/tick do not re-pull 5k+ auth-files every request.
@@ -168,14 +174,23 @@ func (m *mgmtAuth) List() ([]xaiquota.AuthFile, error) {
 		if account == "" {
 			account = f.Email
 		}
+		at := f.AccountType
+		if at == "" {
+			at = f.Type
+		}
 		out = append(out, xaiquota.AuthFile{
-			AuthIndex: f.AuthIndex,
-			Name:      f.Name,
-			Provider:  f.Provider,
-			Account:   account,
-			Disabled:  f.Disabled,
-			Success:   f.Success,
-			Failed:    f.Failed,
+			AuthIndex:   f.AuthIndex,
+			Name:        f.Name,
+			Provider:    f.Provider,
+			Account:     account,
+			Disabled:    f.Disabled,
+			Success:     f.Success,
+			Failed:      f.Failed,
+			Note:        f.Note,
+			Label:       f.Label,
+			Prefix:      f.Prefix,
+			Tag:         f.Tag,
+			AccountType: at,
 		})
 	}
 	// Sticky guard removed: a successful empty response from CPA means

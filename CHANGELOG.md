@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.23
+
+- **吸收 grok-panel 分类能力**（参考 TizenryA/cpa-plugin-grok-panel，MIT）
+  - Free / Super / Heavy 启发式分类（note/label/prefix/tag/account_type + auth JSON 字段）
+  - 账号表新增「套餐」列与筛选；状态栏显示 F/S/H 数量
+  - `tier_protected` 标记 Super/Heavy/Unknown（UI 保护提示；删除仍仅真 401/403 白名单）
+- 文档：`docs/THIRD_PARTY.md` 归因
+- **安装交付**：`registry.json` 商店源；`docs/INSTALL.md` 安装/升级/卸载；CI 多平台 zip（linux/darwin/windows × amd64/arm64）+ tag Release
+
 ## 0.2.22
 
 - **清零今日已用**（可选校准）：`POST .../metrics/reset-today` + UI 按钮

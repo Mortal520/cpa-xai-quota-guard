@@ -10,6 +10,7 @@ build*.log
 data/
 tmp_sync/
 *.json
+!registry.json
 !testdata/**
 .env
 .env.*
@@ -48,3 +49,8 @@ _deploy_*.tgz
 *.tgz
 !docs/**
 
+
+# Release packages live on GitHub Releases
+*.zip
+checksums.txt
+dist/
