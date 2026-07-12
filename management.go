@@ -1498,26 +1498,7 @@ function paintStatusBar(d){
       tip.innerHTML = "";
     }
   }
-  // render delete history into patrol card
-  var dhItems = d.delete_history || [];
-  var dhWrap = document.getElementById("patrolDelHist");
-  var dhBody = document.getElementById("patrolDelBody");
-  if(dhWrap && dhBody){
-    if(dhItems.length){
-      dhWrap.style.display = "";
-      dhBody.innerHTML = dhItems.slice(0,20).map(function(x){
-        var src = (x.reason||"").indexOf("patrol:")>=0 ? "巡查" : "额度";
-        return '<tr style="border-bottom:1px solid #f1f5f9">' +
-          '<td style="padding:.2rem">'+fmtTime(x.deleted_at_ms)+'</td>' +
-          '<td>'+esc(x.account||x.file_name||x.auth_index||"?")+'</td>' +
-          '<td style="font-weight:600">'+src+'</td>' +
-          '<td style="color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis">'+esc(x.reason||"")+'</td>' +
-        '</tr>';
-      }).join("");
-    } else {
-      dhWrap.style.display = "none";
-    }
-  }
+  renderDelHist(d.delete_history || []);
   // live countdown cells without full re-fetch
   const nowMs = Date.now();
 
@@ -1871,6 +1852,33 @@ async function runTick(){
   // visibility resume
   document.addEventListener("visibilitychange", function(){ if(!document.hidden) loadState(); });
 })();
+// ===== Delete History (shared renderer, avoids DOM thrash) =====
+var DEL_HIST_FP = "";
+function renderDelHist(items){
+  var dhWrap = document.getElementById("patrolDelHist");
+  var dhBody = document.getElementById("patrolDelBody");
+  if(!dhWrap || !dhBody) return;
+  if(!items || !items.length){
+    if(dhWrap.style.display !== "none") dhWrap.style.display = "none";
+    if(DEL_HIST_FP){ DEL_HIST_FP = ""; dhBody.innerHTML = ""; }
+    return;
+  }
+  var fp = items.slice(0,20).map(function(x){
+    return (x.auth_index||x.file_name||"") + ":" + (x.deleted_at_ms||0) + ":" + (x.reason||"").slice(0,40);
+  }).join("|");
+  if(fp === DEL_HIST_FP) return; // no change, skip DOM write
+  DEL_HIST_FP = fp;
+  dhWrap.style.display = "";
+  dhBody.innerHTML = items.slice(0,20).map(function(x){
+    var src = (x.reason||"").indexOf("patrol:")>=0 ? "巡查" : "额度";
+    return '<tr style="border-bottom:1px solid #f1f5f9">' +
+      '<td style="padding:.2rem">'+fmtTime(x.deleted_at_ms)+'</td>' +
+      '<td>'+esc(x.account||x.file_name||x.auth_index||"?")+'</td>' +
+      '<td style="font-weight:600">'+src+'</td>' +
+      '<td style="color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis">'+esc(x.reason||"")+'</td>' +
+    '</tr>';
+  }).join("");
+}
 // ===== Patrol =====
 var PATROL_POLL = null;
 function extractPatrol(r){
@@ -1931,26 +1939,7 @@ function paintPatrol(p, r){
       '<td style="color:var(--muted);max-width:300px;overflow:hidden;text-overflow:ellipsis">'+esc(e.reason||"")+'</td>' +
     '</tr>';
   }).join("");
-  // render delete history from patrol/status payload
-  var dh = (r && r.delete_history) || (p && p.delete_history) || [];
-  var dhWrap = document.getElementById("patrolDelHist");
-  var dhBody = document.getElementById("patrolDelBody");
-  if(dhWrap && dhBody){
-    if(dh && dh.length){
-      dhWrap.style.display = "";
-      dhBody.innerHTML = dh.slice(0,20).map(function(x){
-        var src = (x.reason||"").indexOf("patrol:")>=0 ? "巡查" : "额度";
-        return '<tr style="border-bottom:1px solid #f1f5f9">' +
-          '<td style="padding:.2rem">'+fmtTime(x.deleted_at_ms)+'</td>' +
-          '<td>'+esc(x.account||x.file_name||x.auth_index||"?")+'</td>' +
-          '<td style="font-weight:600">'+src+'</td>' +
-          '<td style="color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis">'+esc(x.reason||"")+'</td>' +
-        '</tr>';
-      }).join("");
-    } else {
-      dhWrap.style.display = "none";
-    }
-  }
+  renderDelHist((r && r.delete_history) || (p && p.delete_history) || []);
 }
 async function patrolStart(){
   var btn = document.getElementById("patrolBtn");
