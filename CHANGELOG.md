@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.5
+
+- **402 spending-limit 工作流完善**
+  - 语义：积分/订阅耗尽（`personal-team-blocked:spending-limit`），**不是**死号；plugin_auto 冷却，**不删除**
+  - 与 429 free-usage 状态区分（signal=`spending_limit` vs free-usage）
+  - 新增 `patrol_auto_model_switch`（默认关）：开则 402 时拉取该凭证 `/models` 并尝试备用模型；全失败才冷却
+  - 关自动换模：仅用 `patrol_model` 探测，402 → 冷却禁用
+  - 新增 `POST .../patrol/spending` + UI「仅复查冷却号」：改模型/开关后只扫 spending 冷却账号
+  - 状态记录 `last_probe_model`；日志含 tried 模型列表
+- 文档：DESIGN/README 同步 402 与探测策略
+
 ## 0.2.4
 
 - 巡查探测模型可配置：`patrol_model`（默认 `grok-4.5-build-free`）

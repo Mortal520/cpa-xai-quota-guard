@@ -94,9 +94,15 @@ type probeResult struct {
 	modelUsed string
 }
 
-// PatrolSweep iterates all enabled xAI auth files with a worker pool,
-// probes the upstream directly, and deletes dead credentials.
-func (g *Guard) PatrolSweep() PatrolStatus {
+// PatrolOptions controls one sweep.
+type PatrolOptions struct {
+	// Scope: ""/"all" = enabled xAI + spending cooldowns;
+	// "spending_only" = only plugin_auto spending_limit cooldown accounts (re-check after config change).
+	Scope string `json:"scope"`
+}
+
+// PatrolSweep iterates auth files with a worker pool, probes upstream, and acts on results.
+func (g *Guard) PatrolSweep(opts PatrolOptions) PatrolStatus {
 	g.patrol.mu.Lock()
 	if g.patrol.running {
 		g.patrol.mu.Unlock()
@@ -145,25 +151,36 @@ func (g *Guard) PatrolSweep() PatrolStatus {
 		return g.PatrolStatus()
 	}
 
-	// Full sweep: all enabled xAI, plus plugin_auto spending_limit accounts
-	// (disabled for cooldown but must be re-probed for recovery).
-	// Never include user_manual or 429 free-usage cooldown-only disables here
-	// unless they are spending_limit (signal-gated).
+	scope := strings.ToLower(strings.TrimSpace(opts.Scope))
+	if scope == "" {
+		scope = "all"
+	}
+	// all: enabled xAI + plugin_auto spending_limit cooldowns
+	// spending_only: only spending_limit cooldowns (for re-check after model/config change)
 	candidates := make([]AuthFile, 0, len(files))
 	for _, f := range files {
 		if !IsXAIProvider(f.Provider, "") {
 			continue
 		}
-		if !f.Disabled {
-			candidates = append(candidates, f)
-			continue
-		}
 		live := g.storeGet(f.AuthIndex)
-		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
-			live.Owner == Owner && !live.PreDisabled && live.Signal == "spending_limit" {
-			candidates = append(candidates, f)
+		isSpendingCool := live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
+			live.Owner == Owner && !live.PreDisabled && live.Signal == "spending_limit"
+		switch scope {
+		case "spending_only":
+			if isSpendingCool {
+				candidates = append(candidates, f)
+			}
+		default: // all
+			if !f.Disabled {
+				candidates = append(candidates, f)
+				continue
+			}
+			if isSpendingCool {
+				candidates = append(candidates, f)
+			}
 		}
 	}
+	g.logf("info", "patrol scope=%s candidates=%d auto_model_switch=%v model=%s", scope, len(candidates), cfg.PatrolAutoModelSwitch, cfg.PatrolModel)
 
 	batchLimit := cfg.PatrolBatchSize
 	if batchLimit > 0 && batchLimit < len(candidates) {
@@ -340,52 +357,84 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		baseURL = "https://api.x.ai/v1"
 	}
 
-	model := strings.TrimSpace(g.Config().PatrolModel)
-	if model == "" {
-		model = DefaultPatrolModel
-	}
-	probePayload, _ := json.Marshal(map[string]any{
-		"model":      model,
-		"max_tokens": 1,
-		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
-	})
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/chat/completions", strings.NewReader(string(probePayload)))
-	if err != nil {
-		return probeResult{
-			authIndex: f.AuthIndex,
-			fileName:  f.Name,
-			account:   f.Account,
-			action:    "error",
-			reason:    fmt.Sprintf("build request: %v", err),
-		}
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+af.AccessToken)
-	for k, v := range af.Headers {
-		req.Header.Set(k, v)
+	cfgProbe := g.Config()
+	primary := strings.TrimSpace(cfgProbe.PatrolModel)
+	if primary == "" {
+		primary = DefaultPatrolModel
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return probeResult{
-			authIndex: f.AuthIndex,
-			fileName:  f.Name,
-			account:   f.Account,
-			action:    "error",
-			reason:    fmt.Sprintf("probe request failed (network): %v", err),
+	// Probe sequence: primary first; on 402 optionally try other models from this credential.
+	tryModels := []string{primary}
+	if cfgProbe.PatrolAutoModelSwitch {
+		alts, _, _ := g.listModelsForToken(af.AccessToken, baseURL, af.Headers, cfgProbe.PatrolProxyURL)
+		for _, m := range alts {
+			m = strings.TrimSpace(m)
+			if m == "" || m == primary {
+				continue
+			}
+			// Prefer free-ish ids first for recovery
+			tryModels = append(tryModels, m)
+		}
+		// Prefer free-ish alternates after primary; cap primary+4
+		free := []string{}
+		other := []string{}
+		for _, m := range tryModels[1:] {
+			if strings.Contains(strings.ToLower(m), "free") {
+				free = append(free, m)
+			} else {
+				other = append(other, m)
+			}
+		}
+		tryModels = append([]string{primary}, append(free, other...)...)
+		if len(tryModels) > 5 {
+			tryModels = tryModels[:5]
 		}
 	}
-	defer resp.Body.Close()
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	bodyStr := string(bodyBytes)
-	code := resp.StatusCode
-	_ = model // used in results
 
-	// Outcomes:
-	// - 200 / non-dead 5xx: alive; if was spending_limit cooldown → re-enable
-	// - 429 free-usage: alive (quota window); if was spending_limit → re-enable (free tier usable)
-	// - 402 spending-limit: soft-disable (plugin_auto, signal=spending_limit), do NOT delete
-	// - 403/401: delete dead credential
+	var (
+		code     int
+		bodyStr  string
+		model    string
+		lastErr  string
+		tried    []string
+	)
+	for _, m := range tryModels {
+		model = m
+		tried = append(tried, m)
+		c, b, err := g.doChatProbe(client, baseURL, af.AccessToken, af.Headers, m)
+		if err != nil {
+			lastErr = err.Error()
+			// network error: do not try more models as auth-invalid signal
+			return probeResult{
+				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+				action: "error", reason: fmt.Sprintf("probe network model=%s: %v", m, err), modelUsed: m,
+			}
+		}
+		code, bodyStr = c, b
+		// Success / free-window 429 / non-spending: stop
+		if code == http.StatusOK || code == http.StatusTooManyRequests {
+			break
+		}
+		if IsPermissionDenied(code, bodyStr) || IsInvalidCredentials(code, bodyStr) {
+			break
+		}
+		if IsSpendingLimitBlocked(code, bodyStr) {
+			// try next model if auto-switch still has candidates
+			if cfgProbe.PatrolAutoModelSwitch && m != tryModels[len(tryModels)-1] {
+				g.logf("info", "patrol 402 on model=%s auth=%s, try next", m, f.AuthIndex)
+				continue
+			}
+			break
+		}
+		// other codes: stop (alive-ish or unknown)
+		break
+	}
+	_ = lastErr
+
+	// Outcomes after model tries:
+	// - 200 / 429 free-usage: alive; re-enable if spending_limit cooldown
+	// - 402 spending: soft-disable (after auto-switch exhausted if enabled)
+	// - 403/401: delete
 	reenableIfSpending := func(reason string) probeResult {
 		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
 			live.Signal == "spending_limit" && live.Owner == Owner && !live.PreDisabled {
@@ -393,24 +442,24 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 				if _, err := g.auth.SetDisabled(f.AuthIndex, false); err != nil {
 					return probeResult{
 						authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-						action: "error", reason: fmt.Sprintf("re-enable failed: %v", err), httpCode: code,
+						action: "error", reason: fmt.Sprintf("re-enable failed: %v", err), httpCode: code, modelUsed: model,
 					}
 				}
 			}
 			_ = g.storeMarkActive(f.AuthIndex)
-			g.logf("info", "patrol 探测恢复，已启用 spending_limit 账号 auth=%s reason=%s", f.AuthIndex, reason)
+			g.logf("info", "patrol 探测恢复，已启用 spending_limit 账号 auth=%s reason=%s model=%s tried=%v", f.AuthIndex, reason, model, tried)
 			g.NotifyWebhook("patrol_spending_recovered", map[string]any{
 				"auth_index": f.AuthIndex, "file_name": f.Name, "account": f.Account,
-				"http_code": code, "reason": reason,
+				"http_code": code, "reason": reason, "model": model, "tried": tried,
 			})
 			return probeResult{
 				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-				action: "reenabled", reason: reason + " · model=" + model, httpCode: code, modelUsed: model,
+				action: "reenabled", reason: fmt.Sprintf("%s · model=%s tried=%v", reason, model, tried), httpCode: code, modelUsed: model,
 			}
 		}
 		return probeResult{
 			authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-			action: "alive", reason: reason + " · model=" + model, httpCode: code, modelUsed: model,
+			action: "alive", reason: fmt.Sprintf("%s · model=%s tried=%v", reason, model, tried), httpCode: code, modelUsed: model,
 		}
 	}
 
@@ -418,9 +467,9 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		return reenableIfSpending("200 OK")
 	}
 	if code == http.StatusTooManyRequests {
-		// 429 free-usage means free tier still works → treat as recovered for spending cooldown
 		return reenableIfSpending("429 rate-limited (free quota window; not spending-limit)")
 	}
+
 	if IsSpendingLimitBlocked(code, bodyStr) {
 		// Soft-disable only (distinct signal from 429 free-usage).
 		match, ok := MatchSpendingLimitQuota(MatchInput{
@@ -438,12 +487,13 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 			live.Signal == "spending_limit" && live.Owner == Owner && !live.PreDisabled {
 			rec := *live
 			rec.RecoverAtMS = match.RecoverAt.UnixMilli()
+			rec.LastProbeModel = model
 			rec.Reason = match.Reason
 			rec.Signal = match.Signal
 			_ = g.storeUpsert(rec)
 			return probeResult{
 				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-				action: "cooldown", reason: fmt.Sprintf("spending-limit still active (model=%s)", model), httpCode: code, modelUsed: model,
+				action: "cooldown", reason: fmt.Sprintf("spending-limit still active model=%s tried=%v", model, tried), httpCode: code, modelUsed: model,
 			}
 		}
 		// Disable if currently enabled.
@@ -468,6 +518,7 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 			AuthIndex: f.AuthIndex, FileName: f.Name, Provider: "xai", Account: f.Account,
 			DisableSource: SourcePluginAuto, State: StateAutoDisabled,
 			RecoverAtMS: match.RecoverAt.UnixMilli(), DisabledAtMS: nowMS,
+			LastProbeModel: model,
 			PreDisabled: false, Owner: Owner, Reason: match.Reason, Signal: match.Signal,
 		})
 		g.logf("warn", "patrol spending-limit 已禁用 auth=%s recover_at=%s", f.AuthIndex, match.RecoverAt.Format(time.RFC3339))
@@ -477,7 +528,7 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		})
 		return probeResult{
 			authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-			action: "cooldown", reason: fmt.Sprintf("model=%s · %s", model, truncate(bodyStr, 180)), httpCode: code, modelUsed: model,
+			action: "cooldown", reason: fmt.Sprintf("402 spending-limit model=%s tried=%v · %s", model, tried, truncate(bodyStr, 120)), httpCode: code, modelUsed: model,
 		}
 	}
 	if IsPermissionDenied(code, bodyStr) || IsInvalidCredentials(code, bodyStr) {
@@ -554,6 +605,24 @@ func (g *Guard) PatrolStop() {
 }
 
 // PatrolRunOnce triggers an async manual sweep if not already running.
+func (g *Guard) PatrolRunSpendingOnly() PatrolStatus {
+	g.patrol.mu.Lock()
+	if g.patrol.running {
+		g.patrol.mu.Unlock()
+		return g.PatrolStatus()
+	}
+	g.patrol.mu.Unlock()
+	go g.PatrolSweep(PatrolOptions{Scope: "spending_only"})
+	for i := 0; i < 20; i++ {
+		time.Sleep(25 * time.Millisecond)
+		st := g.PatrolStatus()
+		if st.Running || st.CompletedAtMS > 0 {
+			return st
+		}
+	}
+	return g.PatrolStatus()
+}
+
 func (g *Guard) PatrolRunOnce() PatrolStatus {
 	g.patrol.mu.Lock()
 	if g.patrol.running {
@@ -563,7 +632,7 @@ func (g *Guard) PatrolRunOnce() PatrolStatus {
 	g.patrol.mu.Unlock()
 	// Mark running ASAP so UI sees activity before goroutine starts.
 	// PatrolSweep re-checks and sets counters.
-	go g.PatrolSweep()
+	go g.PatrolSweep(PatrolOptions{Scope: "all"})
 	// Small spin so first status after POST often shows running=true.
 	for i := 0; i < 20; i++ {
 		st := g.PatrolStatus()
@@ -573,6 +642,89 @@ func (g *Guard) PatrolRunOnce() PatrolStatus {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return g.PatrolStatus()
+}
+
+
+// doChatProbe sends a minimal chat/completions request with the given model.
+func (g *Guard) doChatProbe(client *http.Client, baseURL, token string, headers map[string]string, model string) (int, string, error) {
+	payload, _ := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(baseURL, "/")+"/chat/completions", strings.NewReader(string(payload)))
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body), nil
+}
+
+// listModelsForToken GETs /models for one token (no auth-file scan).
+func (g *Guard) listModelsForToken(token, baseURL string, headers map[string]string, proxyURL string) ([]string, string, string) {
+	var models []string
+	seen := map[string]bool{}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		models = append(models, id)
+	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://api.x.ai/v1"
+	}
+	client := g.newPatrolHTTPClient(12*time.Second, proxyURL)
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/models", nil)
+	if err != nil {
+		return nil, "error", err.Error()
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "error", err.Error()
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "error", fmt.Sprintf("HTTP %d", resp.StatusCode)
+	}
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		var arr []struct {
+			ID string `json:"id"`
+		}
+		if err2 := json.Unmarshal(body, &arr); err2 != nil {
+			return nil, "error", err.Error()
+		}
+		for _, m := range arr {
+			add(m.ID)
+		}
+	} else {
+		for _, m := range parsed.Data {
+			add(m.ID)
+		}
+	}
+	return models, "credential", ""
 }
 
 // ListPatrolModels uses one enabled xAI credential to GET /models from upstream.

@@ -34,6 +34,7 @@ type AccountRecord struct {
 	Owner         string `json:"owner,omitempty"`
 	Reason        string `json:"reason,omitempty"`
 	Signal        string `json:"signal,omitempty"`
+	LastProbeModel string `json:"last_probe_model,omitempty"`
 	LastEventHash string `json:"last_event_hash,omitempty"`
 	UpdatedAtMS   int64  `json:"updated_at_ms,omitempty"`
 }

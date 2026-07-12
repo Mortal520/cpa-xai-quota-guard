@@ -1,7 +1,7 @@
 # cpa-xai-quota-guard 设计文档
 
 > xAI 专用额度/死号管控插件（CLIProxyAPI native Go）  
-> 当前实现版本：**0.2.4**（以 `main.go` 中 `pluginVer` 为准）
+> 当前实现版本：**0.2.5**（以 `main.go` 中 `pluginVer` 为准）
 
 ## 1. 目标
 
@@ -88,11 +88,23 @@ Invalid or expired credentials (auth_kind=bearer, ... reason=no auth context)
 **冷却 — HTTP 402（与 429 区分，signal=`spending_limit`）：**
 
 ```json
-{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription. ..."}
+{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok."}
 ```
 
-- **不删除**；`plugin_auto` 软冷却（默认 ~24h 软上限，受 `max_reset_seconds` 约束）
-- 定时/手动巡查**会探测**此类冷却号；probe 得到 200 或 429 free-usage 视为可恢复并启用
+### 402 语义（生产已确认）
+
+1. **不是死号**：凭证仍可能对其它 free 档模型可用；`permission-denied`/401 才删。  
+2. **模型相关**：同一账号对 `grok-3` 可能 402，对 `grok-4.5-build-free` 可能 200/429。  
+3. **业务 usage**：真实请求返回 402 → 立即 `plugin_auto` 冷却（signal=`spending_limit`），与 429 free-usage 分状态。  
+4. **巡查探测**：
+   - 主模型 = `patrol_model`（默认 free 档）  
+   - `patrol_auto_model_switch=false`（默认）：只测主模型；402 → 冷却  
+   - `=true`：主模型 402 后 `GET /models`，再试最多 4 个备用（优先 id 含 `free`）；全部 402 → 冷却；任一 200/429 → 存活/恢复  
+5. **恢复**：巡查 200/429 → 启用；tick 到软 recover_at 也可启  
+6. **复查**：改 `patrol_model` / 自动换模后，用 scope=`spending_only` 仅扫冷却号  
+
+- **不删除**；`plugin_auto` 软冷却（默认 ~24h 软上限，受 `max_reset_seconds` 约束）  
+- 状态可记 `last_probe_model` / 日志 `tried=[...]`  
 
 **忽略 — HTTP 200 流式取消：**
 

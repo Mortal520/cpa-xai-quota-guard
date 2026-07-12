@@ -71,7 +71,8 @@ func buildManagementRegistration() managementRegistration {
 			{Method: "GET", Path: "/cpa-xai-quota-guard/export", Description: "导出今日用量 JSON"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/toggle", Description: "开关 enabled"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/run", Description: "手动触发恢复扫描"},
-		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol", Description: "启动主动巡查(全量探测启用凭证)"},
+		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol", Description: "启动主动巡查(全量：启用凭证+spending冷却号)"},
+		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/spending", Description: "仅巡查 spending_limit 冷却号(改模型后复查)"},
 		{Method: "GET", Path: "/cpa-xai-quota-guard/patrol/status", Description: "巡查状态与日志"},
 		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/stop", Description: "停止当前巡查"},
 		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/config", Description: "保存定时巡查配置"},
@@ -174,6 +175,8 @@ func dispatchAPI(req managementRequest, action string) ([]byte, error) {
 		return runResponse()
 	case "patrol":
 		return patrolResponse(req)
+	case "patrol/spending":
+		return patrolSpendingResponse(req)
 	case "patrol/status":
 		return patrolStatusResponse()
 	case "patrol/stop":
@@ -566,6 +569,7 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			"patrol_concurrency":           cfg.PatrolConcurrency,
 			"patrol_batch_size":            cfg.PatrolBatchSize,
 			"patrol_model":                cfg.PatrolModel,
+			"patrol_auto_model_switch":   cfg.PatrolAutoModelSwitch,
 		},
 		"accounts": outList,
 		"summary": map[string]any{
@@ -670,6 +674,7 @@ func configResponse() ([]byte, error) {
 		"patrol_concurrency":     cfg.PatrolConcurrency,
 		"patrol_batch_size":      cfg.PatrolBatchSize,
 		"patrol_model":          cfg.PatrolModel,
+		"patrol_auto_model_switch": cfg.PatrolAutoModelSwitch,
 	})
 }
 
@@ -707,6 +712,24 @@ func toggleResponse(req managementRequest) ([]byte, error) {
 func runResponse() ([]byte, error) {
 	guard().Tick()
 	return jsonResponse(map[string]any{"ok": true, "ran": true})
+}
+
+
+func patrolSpendingResponse(req managementRequest) ([]byte, error) {
+	if req.Method != http.MethodPost {
+		return okEnvelope(managementResponse{
+			StatusCode: http.StatusMethodNotAllowed,
+			Headers:    http.Header{"content-type": []string{"application/json; charset=utf-8"}},
+			Body:       []byte(`{"error":"POST required"}`),
+		})
+	}
+	g := guard()
+	status := g.PatrolRunSpendingOnly()
+	return jsonResponse(map[string]any{
+		"ok":     true,
+		"scope":  "spending_only",
+		"patrol": status,
+	})
 }
 
 func patrolResponse(req managementRequest) ([]byte, error) {
@@ -1009,7 +1032,7 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
   <div class="card" id="patrolCard">
     <div class="row" style="justify-content:space-between;gap:.5rem;margin-bottom:.35rem">
       <div style="font-weight:700">主动巡查</div>
-      <div class="muted" style="font-size:.78rem" id="patrolHint">全量探测启用凭证 + spending-limit 冷却号；403/401 删除，402 禁用并在额度恢复后启用</div>
+      <div class="muted" style="font-size:.78rem" id="patrolHint">402=积分/订阅耗尽(spending-limit)→冷却不删；可自动换模型再测；403/401 删除；可仅复查冷却号</div>
     </div>
     <div class="row" style="gap:.6rem;flex-wrap:wrap;align-items:center">
       <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem">
@@ -1044,12 +1067,16 @@ code{background:#f1f5f9;padding:.1rem .3rem;border-radius:4px;font-size:.82rem}
         </select>
       </label>
       <button type="button" onclick="refreshPatrolModels()" style="white-space:nowrap">刷新模型列表</button>
-      <span class="muted" style="font-size:.78rem;max-width:280px" id="patrolModelHint">默认免费档；付费模型可能全体 402 spending-limit</span>
+      <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem;white-space:nowrap">
+        <input type="checkbox" id="cfgPatrolAutoModel" style="width:auto"> 402 自动换模型再测
+      </label>
+      <span class="muted" style="font-size:.78rem;max-width:320px" id="patrolModelHint">主模型探测；开启自动换模型时，402 会拉凭证模型列表轮询备用，仍 402 才冷却</span>
     </div>
     <div class="muted" style="margin-top:.4rem;font-size:.8rem" id="patrolCfgHint">配置加载中…</div>
     <hr style="border:none;border-top:1px solid var(--border);margin:.7rem 0">
     <div class="row" style="gap:.6rem;flex-wrap:wrap;align-items:center">
-      <button id="patrolBtn" class="warn" onclick="patrolStart()">启动巡查</button>
+      <button id="patrolBtn" class="warn" onclick="patrolStart()">全量巡查</button>
+      <button id="patrolSpendBtn" class="primary" onclick="patrolSpendingStart()" title="仅复查 plugin_auto spending_limit 冷却号">仅复查冷却号</button>
       <button id="patrolStopBtn" class="off" onclick="patrolStop()" style="display:none">停止巡查</button>
       <span id="patrolStatus" class="muted" style="font-size:.82rem">空闲</span>
     </div>
@@ -1708,10 +1735,11 @@ async function loadState(){
       var pm = cfg.patrol_model || "grok-4.5-build-free";
       ensurePatrolModelOption(pm);
       document.getElementById("cfgPatrolModel").value = pm;
+      document.getElementById("cfgPatrolAutoModel").checked = !!cfg.patrol_auto_model_switch;
       try{ refreshPatrolModels(true); }catch(e){}
       document.getElementById("cfgPatrolProxy").value = ""; // sensitive, not echoed
       ph.textContent = pen
-        ?("已启用 · 周期"+(cfg.patrol_interval||"?")+"s · 并发"+(cfg.patrol_concurrency||"?")+" · 模型"+(cfg.patrol_model||"?")+" · 目录"+(cfg.patrol_auth_dir||"?"))
+        ?("已启用 · 周期"+(cfg.patrol_interval||"?")+"s · 并发"+(cfg.patrol_concurrency||"?")+" · 模型"+(cfg.patrol_model||"?")+" · 自动换模"+(cfg.patrol_auto_model_switch?"开":"关")+" · 目录"+(cfg.patrol_auth_dir||"?"))
         :("未启用 · 模型"+(cfg.patrol_model||"grok-4.5-build-free")+" · 可勾选后点保存配置");
     }
     const list = sortAccounts(d.accounts || []);
@@ -1811,7 +1839,8 @@ async function savePatrolConfig(){
     patrol_proxy_url: document.getElementById("cfgPatrolProxy").value.trim(),
     patrol_concurrency: Number(document.getElementById("cfgPatrolCon").value)||8,
     patrol_batch_size: Number(document.getElementById("cfgPatrolBatch").value)||0,
-    patrol_model: (document.getElementById("cfgPatrolModel").value||"").trim()||"grok-4.5-build-free"
+    patrol_model: (document.getElementById("cfgPatrolModel").value||"").trim()||"grok-4.5-build-free",
+    patrol_auto_model_switch: document.getElementById("cfgPatrolAutoModel").checked
   };
   var ph = document.getElementById("patrolCfgHint");
   if(ph) ph.textContent = "保存中…";
@@ -1978,6 +2007,28 @@ function paintPatrol(p, r){
     }).join("");
   }
   // delete history intentionally not updated from patrol poll (stable UI)
+}
+async function patrolSpendingStart(){
+  var btn = document.getElementById("patrolSpendBtn");
+  var main = document.getElementById("patrolBtn");
+  if(btn){ btn.disabled = true; btn.textContent = "复查中..."; }
+  if(main) main.disabled = true;
+  document.getElementById("patrolStopBtn").style.display = "";
+  document.getElementById("patrolProgress").style.display = "";
+  document.getElementById("patrolLog").style.display = "";
+  document.getElementById("patrolStatus").textContent = "启动 spending 复查...";
+  try {
+    var r = await api("patrol/spending", {method:"POST"});
+    if(!r || !r.ok){ alert("冷却复查启动失败: "+JSON.stringify(r&&r.error||r)); if(btn){btn.disabled=false;btn.textContent="仅复查冷却号";} if(main) main.disabled=false; return; }
+    paintPatrol(extractPatrol(r), r);
+    if(PATROL_POLL) clearInterval(PATROL_POLL);
+    PATROL_POLL = setInterval(patrolPoll, 1500);
+    patrolPoll();
+  } catch(e){
+    alert("冷却复查异常: "+(e&&e.message?e.message:e));
+    if(btn){btn.disabled=false;btn.textContent="仅复查冷却号";}
+    if(main) main.disabled=false;
+  }
 }
 async function patrolStart(){
   var btn = document.getElementById("patrolBtn");

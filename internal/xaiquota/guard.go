@@ -36,9 +36,12 @@ type Config struct {
 	PatrolAuthDir     string
 	PatrolProxyURL   string
 	PatrolConcurrency int
-	// PatrolModel is the upstream model id used for credential probes.
+	// PatrolModel is the primary upstream model id used for credential probes.
 	// Prefer free-tier models (e.g. grok-4.5-build-free); paid models may false-positive as spending-limit.
 	PatrolModel string
+	// PatrolAutoModelSwitch: when probe model returns 402 spending-limit, fetch that credential's
+	// /models list and try alternates before marking spending cooldown. Off = only PatrolModel.
+	PatrolAutoModelSwitch bool
 
 }
 
@@ -58,7 +61,8 @@ func Defaults() Config {
 			PatrolAuthDir:    "",
 			PatrolProxyURL:    "",
 			PatrolConcurrency: 8,
-			PatrolModel:       DefaultPatrolModel,
+			PatrolModel:            DefaultPatrolModel,
+			PatrolAutoModelSwitch:  false,
 	}
 }
 
@@ -222,7 +226,7 @@ func (g *Guard) tickerLoop() {
 			if patrolNext.IsZero() || now.After(patrolNext) {
 				g.logf("info", "patrol 定时巡查触发 interval=%v next≈%v", patrolInterval, now.Add(patrolInterval).Format("15:04:05"))
 				patrolNext = now.Add(patrolInterval)
-				go g.PatrolSweep()
+				go g.PatrolSweep(PatrolOptions{Scope: "all"})
 			}
 		}
 		g.mu.Lock()
