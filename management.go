@@ -72,6 +72,9 @@ func buildManagementRegistration() managementRegistration {
 			{Method: "POST", Path: "/cpa-xai-quota-guard/toggle", Description: "开关 enabled"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/run", Description: "手动触发恢复扫描"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/inject", Description: "注入测试事件（429/403/401/402）"},
+		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol", Description: "启动主动巡查(全量探测启用凭证)"},
+		{Method: "GET", Path: "/cpa-xai-quota-guard/patrol/status", Description: "巡查状态与日志"},
+		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/stop", Description: "停止当前巡查"},
 		},
 	}
 }
@@ -170,6 +173,12 @@ func dispatchAPI(req managementRequest, action string) ([]byte, error) {
 		return runResponse()
 	case "inject":
 		return injectResponse(req)
+	case "patrol":
+		return patrolResponse(req)
+	case "patrol/status":
+		return patrolStatusResponse()
+	case "patrol/stop":
+		return patrolStopResponse()
 	default:
 		return okEnvelope(managementResponse{
 			StatusCode: http.StatusNotFound,
