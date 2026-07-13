@@ -13,6 +13,13 @@ import (
 	"github.com/mortal/cpa-xai-quota-guard/internal/xaiquota"
 )
 
+//go:embed web/console.html
+var consoleHTML []byte
+
+func renderConsole() []byte {
+	return consoleHTML
+}
+
 // managementRequest mirrors the request the host delivers to management.handle.
 // Host may use either PascalCase (Method/Path/Body) or lowercase.
 type managementRequest struct {
@@ -991,12 +998,6 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-//go:embed web/console.html
-var consoleHTML []byte
-
-func renderConsole() []byte {
-	return consoleHTML
-}
 
 func htmlUnescapeBasic(s string) string {
 	replacer := strings.NewReplacer(
