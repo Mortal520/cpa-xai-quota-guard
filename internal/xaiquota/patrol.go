@@ -1176,9 +1176,9 @@ func (g *Guard) recordProbeResult(r probeResult) {
 	}
 
 	// Persist material actions into durable action_history (survives restart).
+	// Skip routine net_* so passive/tick cooldown logs are not drowned by patrol noise.
 	switch entry.Action {
 	case "deleted", "cooldown", "reenabled", "error",
-		"net_timeout", "net_canceled", "net_dns", "net_tls", "net_connect", "net_error",
 		"probe_http_4xx", "probe_http_5xx", "probe_unprocessable", "region_block", "cli_version",
 		"patrol_abort_net":
 		if g.store != nil {
@@ -1369,14 +1369,18 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 	_ = lastErr
 
 	// Outcomes after model tries:
-	// - 200: alive; re-enable if spending_limit cooldown
+	// - 200: alive; re-enable ANY plugin_auto cooldown (free-usage or spending_limit)
 	// - 429 free-usage: cooldown (enabled) or re-enable spending_limit; never delete
 	// - 402 spending: soft-disable (after auto-switch exhausted if enabled)
 	// - 403/401 dead: delete
 	// - region/404/5xx: error, no delete
-	reenableIfSpending := func(reason string) probeResult {
+	reenablePluginAuto := func(reason string) probeResult {
+		// Probe success (or spending→free path) means the credential is usable again.
+		// Previously only spending_limit was re-enabled on HTTP 200, so free-usage
+		// cooldowns stayed disabled even when probe returned alive (total_alive>0,
+		// total_reenabled=0). Re-enable all plugin_auto owned cooldowns.
 		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
-			live.Signal == "spending_limit" && live.Owner == Owner && !live.PreDisabled {
+			live.Owner == Owner && !live.PreDisabled {
 			if g.auth != nil {
 				if _, err := g.auth.SetDisabled(f.AuthIndex, false); err != nil {
 					return probeResult{
@@ -1386,14 +1390,18 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 				}
 			}
 			_ = g.storeMarkActive(f.AuthIndex)
-			g.logf("info", "patrol 探测恢复，已启用 spending_limit 账号 auth=%s reason=%s model=%s tried=%v", f.AuthIndex, reason, model, tried)
-			g.NotifyWebhook("patrol_spending_recovered", map[string]any{
+			sig := live.Signal
+			if sig == "" {
+				sig = "plugin_auto"
+			}
+			g.logf("info", "patrol 探测恢复，已启用 plugin_auto 冷却号 auth=%s signal=%s reason=%s model=%s tried=%v", f.AuthIndex, sig, reason, model, tried)
+			g.NotifyWebhook("patrol_cooldown_recovered", map[string]any{
 				"auth_index": f.AuthIndex, "file_name": f.Name, "account": f.Account,
-				"http_code": code, "reason": reason, "model": model, "tried": tried,
+				"http_code": code, "reason": reason, "model": model, "tried": tried, "signal": sig,
 			})
 			return probeResult{
 				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-				action: "reenabled", reason: fmt.Sprintf("%s · model=%s tried=%v", reason, model, tried), httpCode: code, modelUsed: model,
+				action: "reenabled", reason: fmt.Sprintf("%s · signal=%s · model=%s tried=%v", reason, sig, model, tried), httpCode: code, modelUsed: model,
 			}
 		}
 		return probeResult{
@@ -1403,7 +1411,7 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 	}
 
 	if code == http.StatusOK {
-		return reenableIfSpending("200 OK")
+		return reenablePluginAuto("200 OK")
 	}
 	if code == http.StatusTooManyRequests {
 		// 429 never deletes.
@@ -1411,7 +1419,7 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		// free-usage short window on enabled account => plugin_auto cooldown (same as HandleUsage)
 		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
 			live.Signal == "spending_limit" && live.Owner == Owner && !live.PreDisabled {
-			return reenableIfSpending("429 rate-limited (free quota window; not spending-limit)")
+			return reenablePluginAuto("429 rate-limited (free quota window; not spending-limit)")
 		}
 		match429, ok429 := MatchShortWindowQuota(MatchInput{
 			Provider: "xai", Failed: true, StatusCode: code, Body: bodyStr, Now: time.Now(),

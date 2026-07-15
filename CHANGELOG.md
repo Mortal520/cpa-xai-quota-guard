@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.12
+
+- **修复复查冷却号不自动恢复**：探测 HTTP 200 时恢复所有 `plugin_auto` 冷却号（含 free-usage），不再仅限 `spending_limit`；此前会出现 `alive>0` 但 `reenabled=0`
+- **处理日志**：巡查常规 `net_*` 不再写入持久化 action_history，避免淹没被动/恢复日志（仍保留在巡查 recent_log）
 ## 0.3.11
 
 - **日额度池默认**：单账号估算由 **1M → 2M**（DefaultFreeLimit）；升级后覆盖 state 里旧的 1M 默认（与线上 free-usage limit=2000000 样本对齐）
