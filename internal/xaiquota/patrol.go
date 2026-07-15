@@ -1434,18 +1434,24 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		if actual, limit, pok := ParseFreeUsageTokens(bodyStr); pok {
 			_ = g.storeObserveQuota(f.AuthIndex, actual, limit)
 		}
-		// Already our free-usage / short-window cooldown → extend (not spending_limit).
+		// Already our free-usage / short-window cooldown → refresh reason only;
+		// soft recover_at must NOT restart from now+24h (breaks tick auto-recovery).
 		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
 			live.Owner == Owner && !live.PreDisabled && live.Signal != "spending_limit" {
 			rec := *live
-			rec.RecoverAtMS = match429.RecoverAt.UnixMilli()
+			prevRA := rec.RecoverAtMS
+			rec.RecoverAtMS = CoalesceRecoverAtMS(live, match429)
 			rec.LastProbeModel = model
 			rec.Reason = match429.Reason
 			rec.Signal = match429.Signal
 			_ = g.storeUpsert(rec)
+			note := "保持原恢复时间"
+			if rec.RecoverAtMS != prevRA {
+				note = "更新恢复时间"
+			}
 			return probeResult{
 				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
-				action: "cooldown", reason: fmt.Sprintf("429 free-usage 延长冷却 model=%s · %s", model, match429.Reason), httpCode: code, modelUsed: model,
+				action: "cooldown", reason: fmt.Sprintf("429 free-usage 复检·%s model=%s · %s", note, model, match429.Reason), httpCode: code, modelUsed: model,
 			}
 		}
 		if g.auth != nil && !f.Disabled {
@@ -1499,7 +1505,7 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&
 			live.Signal == "spending_limit" && live.Owner == Owner && !live.PreDisabled {
 			rec := *live
-			rec.RecoverAtMS = match.RecoverAt.UnixMilli()
+			rec.RecoverAtMS = CoalesceRecoverAtMS(live, match)
 			rec.LastProbeModel = model
 			rec.Reason = match.Reason
 			rec.Signal = match.Signal

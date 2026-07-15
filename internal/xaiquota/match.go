@@ -30,6 +30,10 @@ type MatchResult struct {
 	RecoverAt time.Time
 	Reason    string
 	Signal    string
+	// Soft is true when RecoverAt is an estimate (rolling 24h / spending soft ceiling)
+	// rather than Retry-After or an explicit reset timestamp. Soft re-hits must not
+	// push RecoverAt further into the future (would break tick auto-recovery).
+	Soft bool
 }
 
 // MatchShortWindowQuota returns a result only for strict xAI short-window
@@ -65,12 +69,14 @@ func MatchShortWindowQuota(in MatchInput) (MatchResult, bool) {
 		return MatchResult{}, false
 	}
 
+	soft := false
 	recoverAt, ok := parseRecoverAt(body, in.ResponseHeaders, now, maxReset)
 	if !ok {
 		// Grok free-usage body often has "rolling 24-hour window" without Retry-After.
 		if at, okDef := defaultRecoverFromBody(body, in.ResponseHeaders, now, maxReset); okDef {
 			recoverAt = at
 			ok = true
+			soft = true
 		} else {
 			return MatchResult{}, false
 		}
@@ -86,6 +92,7 @@ func MatchShortWindowQuota(in MatchInput) (MatchResult, bool) {
 		RecoverAt: recoverAt,
 		Reason:    buildHumanReason(body, signal, recoverAt, now),
 		Signal:    signal,
+		Soft:      soft,
 	}, true
 }
 
@@ -127,6 +134,7 @@ func MatchSpendingLimitQuota(in MatchInput) (MatchResult, bool) {
 		RecoverAt: recoverAt,
 		Reason:    reason,
 		Signal:    "spending_limit",
+		Soft:      true,
 	}, true
 }
 
@@ -802,3 +810,74 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// SoftCooldownWindow is the default rolling free-usage / soft spending ceiling.
+const SoftCooldownWindow = 24 * time.Hour
+
+// SoftCooldownMS is SoftCooldownWindow in milliseconds.
+const SoftCooldownMS = int64(SoftCooldownWindow / time.Millisecond)
+
+// CoalesceRecoverAtMS merges a new match recover time into an existing cooldown.
+// Soft estimates must not restart the clock (now+24h on every 429 re-hit); that
+// would permanently prevent Tick auto-recovery. Precise parses may replace.
+// When DisabledAtMS is known, soft recover is also capped at DisabledAt+24h.
+func CoalesceRecoverAtMS(existing *AccountRecord, match MatchResult) int64 {
+	newMS := match.RecoverAt.UnixMilli()
+	if newMS <= 0 {
+		if existing != nil {
+			return existing.RecoverAtMS
+		}
+		return 0
+	}
+	var disabledAt int64
+	var prev int64
+	if existing != nil {
+		disabledAt = existing.DisabledAtMS
+		prev = existing.RecoverAtMS
+	}
+	if match.Soft && disabledAt > 0 {
+		capMS := disabledAt + SoftCooldownMS
+		if newMS > capMS {
+			newMS = capMS
+		}
+	}
+	if prev <= 0 {
+		return newMS
+	}
+	if match.Soft {
+		// Keep the earlier schedule; never push soft recover further out.
+		out := prev
+		if newMS > 0 && newMS < out {
+			out = newMS
+		}
+		if disabledAt > 0 {
+			capMS := disabledAt + SoftCooldownMS
+			if out > capMS {
+				out = capMS
+			}
+		}
+		return out
+	}
+	// Precise: trust the latest parse (Retry-After / reset timestamp).
+	return newMS
+}
+
+// EffectiveRecoverAtMS returns the recover deadline used by Tick.
+// Clamps wrongly extended soft recover_at (from older builds) back to DisabledAt+24h.
+func EffectiveRecoverAtMS(rec *AccountRecord) int64 {
+	if rec == nil {
+		return 0
+	}
+	r := rec.RecoverAtMS
+	if rec.DisabledAtMS > 0 {
+		capMS := rec.DisabledAtMS + SoftCooldownMS
+		if r <= 0 || r > capMS {
+			if r <= 0 {
+				return capMS
+			}
+			return capMS
+		}
+	}
+	return r
+}
+

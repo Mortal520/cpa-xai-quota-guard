@@ -67,3 +67,8 @@ TASK_ARCHIVE.md
 
 _reltest/
 
+
+# local build/test noise
+_test_out.txt
+_push_log.txt
+

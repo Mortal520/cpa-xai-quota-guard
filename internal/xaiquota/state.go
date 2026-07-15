@@ -244,8 +244,16 @@ func (s *Store) DueAutoDisabled(now time.Time) []AccountRecord {
 		if rec.PreDisabled {
 			continue
 		}
-		if rec.RecoverAtMS <= 0 || nowMS < rec.RecoverAtMS {
+		// Use effective recover (clamps soft recover wrongly extended by re-hits).
+		eff := EffectiveRecoverAtMS(rec)
+		if eff <= 0 || nowMS < eff {
 			continue
+		}
+		// Heal persisted recover_at if it was pushed past DisabledAt+24h.
+		if rec.RecoverAtMS != eff {
+			rec.RecoverAtMS = eff
+			rec.UpdatedAtMS = nowMS
+			s.Updated = nowMS
 		}
 		out = append(out, *rec)
 	}

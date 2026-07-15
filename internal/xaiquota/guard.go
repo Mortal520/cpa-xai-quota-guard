@@ -371,9 +371,9 @@ func (g *Guard) disableForMatch(authIndex string, ev UsageEvent, match MatchResu
 	existing := g.storeGet(authIndex)
 	if current.Disabled {
 		if existing != nil && existing.State == StateAutoDisabled && existing.DisableSource == SourcePluginAuto && existing.Owner == Owner && !existing.PreDisabled {
-			// Extend cooldown.
+			// Soft re-hit: keep original recover schedule (do not restart 24h clock).
 			rec := *existing
-			rec.RecoverAtMS = match.RecoverAt.UnixMilli()
+			rec.RecoverAtMS = CoalesceRecoverAtMS(existing, match)
 			rec.Reason = match.Reason
 			rec.Signal = match.Signal
 			rec.LastEventHash = ev.EventHash

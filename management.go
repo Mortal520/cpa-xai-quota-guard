@@ -447,7 +447,8 @@ func stateResponse(req managementRequest) ([]byte, error) {
 		if hasRec {
 			item["state"] = rec.State
 			item["disable_source"] = rec.DisableSource
-			item["recover_at_ms"] = rec.RecoverAtMS
+			effRecover := xaiquota.EffectiveRecoverAtMS(&rec)
+			item["recover_at_ms"] = effRecover
 			item["disabled_at_ms"] = rec.DisabledAtMS
 			item["pre_disabled"] = rec.PreDisabled
 			item["owner"] = rec.Owner
@@ -456,7 +457,7 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			item["updated_at_ms"] = rec.UpdatedAtMS
 			if rec.State == xaiquota.StateAutoDisabled {
 				autoN++
-				if rec.RecoverAtMS > 0 && now >= rec.RecoverAtMS {
+				if effRecover > 0 && now >= effRecover {
 					dueN++
 					item["health"] = "due"
 				} else {

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.13
+
+### 修复
+- **冷却自动恢复时钟被 429/巡查复检无限后推**：soft 额度（rolling 24h free-usage / spending soft ceiling）复检时不再把 `recover_at` 重置为 now+24h
+- 到期判定使用 `EffectiveRecoverAtMS`：错误延长到超过 `disabled_at+24h` 的 recover 会被钳回，Tick 到点自动启用并从冷却列表移除
+- 状态 API 展示的恢复时间同步使用有效 recover（与 Tick 一致）
+
+### 说明
+- free-usage 无精确 reset 时间戳时，恢复锚点为 **首次禁用时刻 + 24h**，不是每次复检重计
+- 精确 Retry-After / reset 解析仍可覆盖；`user_manual` 永不自动启用
+- 复查冷却号探测 200 仍可提前恢复（0.3.12 逻辑保留）
+
 ## 0.3.12
 
 - **修复复查冷却号不自动恢复**：探测 HTTP 200 时恢复所有 `plugin_auto` 冷却号（含 free-usage），不再仅限 `spending_limit`；此前会出现 `alive>0` 但 `reenabled=0`

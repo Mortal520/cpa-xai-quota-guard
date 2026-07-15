@@ -100,7 +100,10 @@ Invalid or expired credentials (auth_kind=bearer, ... reason=no auth context)
    - 主模型 = `patrol_model`（默认 free 档）  
    - `patrol_auto_model_switch=false`（默认）：只测主模型；402 → 冷却  
    - `=true`：主模型 402 后 `GET /models`，再试最多 4 个备用（优先 id 含 `free`）；全部 402 → 冷却；任一 200/429 → 存活/恢复  
-5. **恢复**：巡查 200/429 → 启用；tick 到软 recover_at 也可启  
+5. **恢复**：
+   - 巡查探测 **200** → 立即启用任意 `plugin_auto` 冷却（free-usage / spending）
+   - spending 冷却 + 探测 **429 free-usage** → 视为 free 路径仍可用，启用
+   - Tick：`now >= EffectiveRecoverAtMS` 自动启用（仅 `plugin_auto`，永不碰 `user_manual`）
 6. **复查**：改 `patrol_model` / 自动换模后，用 scope=`spending_only` 仅扫冷却号  
 
 - **不删除**；`plugin_auto` 软冷却（默认 ~24h 软上限，受 `max_reset_seconds` 约束）  
@@ -144,7 +147,14 @@ context canceled  + Content-Type: text/event-stream
 1. Header `Retry-After`  
 2. Header `x-ratelimit-reset*`  
 3. Body `retry_after` / `reset_at` / `resets_at` 等  
-4. free-usage **rolling 24-hour window** → 默认 now+24h（截断到 max）  
+4. free-usage **rolling 24-hour window** → soft 默认 **首次禁用时刻 + 24h**（写入时用 now+24h，与 disabled_at 同步；截断到 max）  
+
+**Soft 时钟规则（0.3.13）：**
+
+- 精确解析（1–3）可更新 `recover_at`  
+- soft 复检（被动 429 / 巡查 429）**不得**把 `recover_at` 重置为 now+24h  
+- 到期判定用 `EffectiveRecoverAtMS`：将错误延长到超过 `disabled_at+24h` 的值钳回  
+- 到点 Tick 启用后账号离开冷却列表；未到期时列表中看到冷却号是正常状态  
 
 解析失败且无默认路径 → **不禁用**。
 
@@ -152,12 +162,15 @@ context canceled  + Content-Type: text/event-stream
 
 ```
 active
-  └─ 429 free-usage 合法 → auto_disabled (disable_source=plugin_auto)
-auto_disabled
-  └─ now >= recover_at → 启用 → active（仅 plugin_auto）
+  └─ 429 free-usage 合法 → auto_disabled (disable_source=plugin_auto, recover 锚点=disabled_at+24h soft)
+  └─ 402 spending-limit → auto_disabled (signal=spending_limit, soft ~24h)
+auto_disabled (plugin_auto)
+  ├─ now >= EffectiveRecoverAtMS → Tick 启用 → active
+  ├─ 巡查/复查 200 → 立即启用 → active
+  └─ soft 429 复检 → 刷新 reason，不后推 recover_at
 user_manual_disabled
   └─ 永不自动启用
-dead credential (401/402/403 白名单)
+dead credential (401 / 真 403 permission-denied)
   └─ DELETE auth-files + delete_history
 ```
 

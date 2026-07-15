@@ -1,5 +1,7 @@
 # 安装 / 升级 / 卸载
 
+> 当前稳定实现版本：**0.3.13**（见 [CHANGELOG](../CHANGELOG.md)）。商店/脚本安装以 GitHub Release 资产为准。
+
 插件 ID：`cpa-xai-quota-guard`  
 当前版本以 `main.go` 的 `pluginVer` 与 [registry.json](../registry.json) 为准。
 
