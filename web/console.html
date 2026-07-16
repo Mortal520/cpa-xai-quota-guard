@@ -1335,6 +1335,11 @@ async function loadState(opts){
   opts = opts || {};
   if((LOADING_STATE || LOAD_STATE_INFLIGHT) && opts.soft) return;
   if(LOAD_STATE_INFLIGHT && !opts.force) return;
+  if(LOAD_STATE_INFLIGHT && opts.force){
+    // coalesce: run again after current load finishes
+    window._STATE_RELOAD_QUEUED = true;
+    return;
+  }
   LOADING_STATE = true;
   LOAD_STATE_INFLIGHT = true;
   const view = currentStateView();
@@ -1461,6 +1466,10 @@ async function loadState(opts){
     renderAccountTable();
   } finally {
     LOAD_STATE_INFLIGHT = false; LOADING_STATE = false;
+    if(window._STATE_RELOAD_QUEUED){
+      window._STATE_RELOAD_QUEUED = false;
+      try{ setTimeout(function(){ loadState({force:true}); }, 50); }catch(e){}
+    }
   }
 }
 function sortAccounts(list){
@@ -2079,9 +2088,7 @@ function paintPatrol(p, r){
       st.style.color = "var(--muted)";
       if(st2) st2.style.color = "";
     }
-    document.getElementById("patrolBtn").textContent = "启动巡查";
-    document.getElementById("patrolBtn").disabled = false;
-    document.getElementById("patrolStopBtn").style.display = "none";
+    unlockPatrolButtons();
   }
   st.textContent = line1;
   if(st2) st2.textContent = line2 || "";
@@ -2165,6 +2172,25 @@ async function patrolStop(){
   setTimeout(patrolPoll, 800);
   setTimeout(patrolPoll, 1600);
 }
+function unlockPatrolButtons(){
+  try{
+    var b=document.getElementById("patrolBtn"); if(b){ b.disabled=false; b.textContent="启动巡查"; }
+    var sb=document.getElementById("patrolSpendBtn"); if(sb){ sb.disabled=false; sb.textContent="仅复查冷却号"; }
+    var st=document.getElementById("patrolStopBtn"); if(st) st.style.display="none";
+  }catch(e){}
+}
+/** After patrol/recheck finishes: force-refresh accounts/status (soft load can no-op while inflight). */
+function onPatrolFinishedRefresh(){
+  unlockPatrolButtons();
+  if(window._PATROL_FINISH_REFRESH_T){ try{ clearTimeout(window._PATROL_FINISH_REFRESH_T); }catch(e){} }
+  function doLoad(){
+    try{ loadState({force:true}); }catch(e){ console.warn("post-patrol loadState", e); }
+  }
+  doLoad();
+  // CPA inventory / store may lag one tick after re-enable
+  window._PATROL_FINISH_REFRESH_T = setTimeout(doLoad, 1200);
+  setTimeout(doLoad, 2800);
+}
 async function patrolPoll(){
   try{
   window._PATROL_POLL_N = (window._PATROL_POLL_N||0) + 1;
@@ -2184,7 +2210,7 @@ async function patrolPoll(){
       var rf = await api("patrol/status?log=50", {method:"GET"});
       if(rf && rf.ok){ var pf=extractPatrol(rf); if(pf) paintPatrol(pf, rf); }
     }catch(e){}
-    try{ loadState({soft:true}); }catch(e){}
+    onPatrolFinishedRefresh();
   }
   }catch(e){ console.warn("patrolPoll", e); }
 }
