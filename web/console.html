@@ -982,6 +982,7 @@ function paintStatusBar(d){
   set("sAuto", s.auto_disabled||0);
   const m = d.metrics || {};
   const xaiN = (m.xai_total != null ? m.xai_total : (s.total||0));
+  const xaiE = m.xai_enabled || 0;
   const autoD = s.auto_disabled || 0;
   const manualD = s.user_manual || 0;
   const avail = Math.max(0, xaiN - autoD - manualD);
