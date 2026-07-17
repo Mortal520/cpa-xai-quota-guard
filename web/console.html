@@ -982,10 +982,9 @@ function paintStatusBar(d){
   set("sAuto", s.auto_disabled||0);
   const m = d.metrics || {};
   const xaiN = (m.xai_total != null ? m.xai_total : (s.total||0));
-  const xaiE = m.xai_enabled || 0;
   const autoD = s.auto_disabled || 0;
   const manualD = s.user_manual || 0;
-  const avail = Math.max(0, xaiE - autoD - manualD);
+  const avail = Math.max(0, xaiN - autoD - manualD);
 
   set("sXaiTotal", xaiN);
   const split = document.getElementById("sXaiSplit");
@@ -1001,7 +1000,7 @@ function paintStatusBar(d){
   set("sXaiAvail", avail);
   var availSub = document.getElementById("sAvailSub");
   if(availSub){
-    var parts = ["CPA启用 "+xaiE];
+    var parts = ["总数 "+xaiN];
     if(autoD > 0) parts.push("- 程序停用 "+autoD);
     if(manualD > 0) parts.push("- 手动停用 "+manualD);
     availSub.textContent = parts.join(" · ");

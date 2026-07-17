@@ -1,4 +1,9 @@
 # Changelog
+## 0.3.16
+
+### 修复
+- **可用数计算修正**：改用 `xai_total - auto_disabled - user_manual`，修复因 `xai_enabled` 与 `auto_disabled` 数据源不一致导致可用显示为 0 的问题
+
 ## 0.3.15
 
 ### 变更
