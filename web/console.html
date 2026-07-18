@@ -351,7 +351,7 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
     </div>
     <div class="row" style="gap:.6rem;flex-wrap:wrap;margin-top:.4rem">
       <label style="font-size:.85rem;flex:1;min-width:200px">auth 目录
-        <input id="cfgPatrolDir" type="text" placeholder="/root/.cli-proxy-api" style="width:100%">
+        <input id="cfgPatrolDir" placeholder="可空=自动 ~/.cli-proxy-api" type="text" placeholder="/root/.cli-proxy-api" style="width:100%">
       </label>
       <label style="font-size:.85rem;flex:1;min-width:180px">代理(可选)
         <input id="cfgPatrolProxy" type="text" placeholder="socks5://host:port" style="width:100%">
@@ -1819,13 +1819,15 @@ async function savePatrolConfig(){
     patrol_interval: Math.max(60, Math.round((Number(document.getElementById("cfgPatrolInt").value)||60)*60)),
     patrol_timeout: Number(document.getElementById("cfgPatrolTO").value)||15,
       patrol_initial_delay_sec: Math.max(0, Number((document.getElementById("cfgPatrolInitDelay")||{}).value)||0),
-    patrol_auth_dir: document.getElementById("cfgPatrolDir").value.trim(),
     patrol_proxy_url: document.getElementById("cfgPatrolProxy").value.trim(),
     patrol_concurrency: Number(document.getElementById("cfgPatrolCon").value)||24,
     patrol_batch_size: Number(document.getElementById("cfgPatrolBatch").value)||0,
     patrol_model: (document.getElementById("cfgPatrolModel").value||"").trim()||"grok-4.5",
     patrol_auto_model_switch: document.getElementById("cfgPatrolAutoModel").checked
   };
+  // Only send auth_dir when non-empty — empty must not wipe server config.
+  var _authDir = document.getElementById("cfgPatrolDir").value.trim();
+  if(_authDir) body.patrol_auth_dir = _authDir;
   var ph = document.getElementById("patrolCfgHint");
   if(ph) ph.textContent = "保存中…";
   try {

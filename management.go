@@ -615,7 +615,8 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			"patrol_enabled":               cfg.PatrolEnabled,
 			"patrol_interval":              cfg.PatrolInterval,
 			"patrol_timeout":               cfg.PatrolTimeout,
-			"patrol_auth_dir":              cfg.PatrolAuthDir,
+			"patrol_auth_dir":              xaiquota.ResolvePatrolAuthDir(cfg.PatrolAuthDir),
+			"patrol_auth_dir_raw":          cfg.PatrolAuthDir,
 			"patrol_concurrency":           cfg.PatrolConcurrency,
 			"patrol_batch_size":            cfg.PatrolBatchSize,
 			"patrol_model":                cfg.PatrolModel,
@@ -1027,7 +1028,14 @@ func patrolConfigResponse(req managementRequest) ([]byte, error) {
 		cfg.PatrolTimeout = *body.PatrolTimeout
 	}
 	if body.PatrolAuthDir != nil {
-		cfg.PatrolAuthDir = strings.TrimSpace(*body.PatrolAuthDir)
+		d := strings.TrimSpace(*body.PatrolAuthDir)
+		if d != "" {
+			cfg.PatrolAuthDir = d
+		}
+		// empty string from UI must NOT wipe existing configured auth dir
+	}
+	if strings.TrimSpace(cfg.PatrolAuthDir) == "" {
+		cfg.PatrolAuthDir = xaiquota.ResolvePatrolAuthDir("")
 	}
 	if body.PatrolProxyURL != nil {
 		cfg.PatrolProxyURL = strings.TrimSpace(*body.PatrolProxyURL)

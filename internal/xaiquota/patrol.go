@@ -707,10 +707,18 @@ func (g *Guard) PatrolSweep(opts PatrolOptions) PatrolStatus {
 		g.setPatrolError("auth lookup nil")
 		return g.PatrolStatus()
 	}
-	authDir := strings.TrimSpace(cfg.PatrolAuthDir)
+	authDir := ResolvePatrolAuthDir(cfg.PatrolAuthDir)
 	if authDir == "" {
-		g.setPatrolError("patrol_auth_dir not configured")
+		g.setPatrolError("patrol_auth_dir not configured (set patrol_auth_dir or place auth files under ~/.cli-proxy-api)")
 		return g.PatrolStatus()
+	}
+	// Remember discovered dir for subsequent runs without rewriting yaml mid-flight.
+	if strings.TrimSpace(cfg.PatrolAuthDir) == "" && authDir != "" {
+		g.mu.Lock()
+		if strings.TrimSpace(g.cfg.PatrolAuthDir) == "" {
+			g.cfg.PatrolAuthDir = authDir
+		}
+		g.mu.Unlock()
 	}
 
 	files, err := g.auth.List()
@@ -1719,6 +1727,72 @@ type PatrolStatusOpts struct {
 }
 
 // PatrolStatus returns UI status with default log truncation (50, interesting-first).
+
+// ResolvePatrolAuthDir returns configured auth dir, or discovers a usable default for pure CPA.
+// Empty config no longer blocks patrol — common Docker/host paths are tried in order.
+func ResolvePatrolAuthDir(configured string) string {
+	if d := strings.TrimSpace(configured); d != "" {
+		if st, err := os.Stat(d); err == nil && st.IsDir() {
+			return d
+		}
+		// configured but missing: still return it so error is clear later; also try defaults as fallback
+		if alt := firstExistingAuthDir(); alt != "" {
+			return alt
+		}
+		return d
+	}
+	if alt := firstExistingAuthDir(); alt != "" {
+		return alt
+	}
+	// last resort defaults even if not yet present (CPA may create later)
+	for _, d := range defaultPatrolAuthDirCandidates() {
+		return d
+	}
+	return ""
+}
+
+func defaultPatrolAuthDirCandidates() []string {
+	home, _ := os.UserHomeDir()
+	cands := []string{
+		strings.TrimSpace(os.Getenv("CPA_AUTH_DIR")),
+		strings.TrimSpace(os.Getenv("CLIPROXY_AUTH_DIR")),
+		"/root/.cli-proxy-api",
+		"/home/root/.cli-proxy-api",
+	}
+	if home != "" {
+		cands = append(cands,
+			filepath.Join(home, ".cli-proxy-api"),
+			filepath.Join(home, ".cli-proxy-api", "auth"),
+		)
+	}
+	cands = append(cands,
+		"/data/.cli-proxy-api",
+		"/app/.cli-proxy-api",
+		"./auth",
+		"./data/auth",
+	)
+	out := make([]string, 0, len(cands))
+	seen := map[string]bool{}
+	for _, d := range cands {
+		d = strings.TrimSpace(d)
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
+}
+
+func firstExistingAuthDir() string {
+	for _, d := range defaultPatrolAuthDirCandidates() {
+		if st, err := os.Stat(d); err == nil && st.IsDir() {
+			return d
+		}
+	}
+	return ""
+}
+
 func (g *Guard) PatrolStatus() PatrolStatus {
 	return g.PatrolStatusWith(PatrolStatusOpts{})
 }
@@ -1981,7 +2055,7 @@ func (g *Guard) ListPatrolModels() (models []string, source string, errMsg strin
 	if err != nil {
 		return models, source, err.Error()
 	}
-	authDir := strings.TrimSpace(cfg.PatrolAuthDir)
+	authDir := ResolvePatrolAuthDir(cfg.PatrolAuthDir)
 	if authDir == "" {
 		return models, source, "patrol_auth_dir empty"
 	}

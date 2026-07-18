@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.21
+
+### 修复巡查 `patrol_auth_dir not configured`
+- 空目录自动探测：`/root/.cli-proxy-api`、`~/.cli-proxy-api`、环境变量 `CPA_AUTH_DIR` 等
+- 保存巡查配置时**不会用空值覆盖**已有 `patrol_auth_dir`
+- state 回显有效目录（自动解析后）
+
+
 ## 0.3.20
 
 ### 对齐 grok-inspection 的纯 CPA 体验
