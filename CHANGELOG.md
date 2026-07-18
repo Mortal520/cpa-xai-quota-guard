@@ -1,4 +1,15 @@
 # Changelog
+
+## 0.3.18
+
+### 纯 CPA 兼容（吸收 grok-inspection）
+- `management_url` 为空时自动解析：`CPA_MANAGEMENT_BASE_URL` / `PORT` / 默认 `http://127.0.0.1:8317`
+- `management_key` 可回退环境变量 `CPA_MANAGEMENT_KEY` / `MANAGEMENT_PASSWORD`
+- 环回 management 请求不走 HTTP_PROXY（避免 Docker/代理劫持）
+- UI `cfgMeta` 区分「浏览器 Key」与「进程侧 management」；不再把未填 Key 误报为 empty 服务器配置
+- CPAMP 明确为可选；未配置时回补按钮禁用，冷却/巡查不受影响
+- 参考 [grok-inspection](https://github.com/ywddd/grok-inspection) 的 management 基址解析与面板 Key 体验
+
 ## 0.3.17
 
 ### 修复

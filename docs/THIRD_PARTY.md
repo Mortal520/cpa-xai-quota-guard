@@ -26,3 +26,7 @@
 
 - [NikaidouYui/cpa-xai-quota-guard](https://github.com/NikaidouYui/cpa-xai-quota-guard)：DefaultFreeLimit 1M→2M 与 state 升级强制对齐；已合入上游 0.3.11。
 - [YaoZeChuan/cpa-xai-quota-guard](https://github.com/YaoZeChuan/cpa-xai-quota-guard)：CI/registry 自托管改名；zip 仍嵌套 goos/goarch，**未**合入（会商店 502）。
+
+## Inspiration
+
+- [ywddd/grok-inspection](https://github.com/ywddd/grok-inspection): management base URL resolution (env/default 127.0.0.1), loopback proxy bypass, management key UX.

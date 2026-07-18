@@ -12,6 +12,7 @@ import (
 )
 
 func configDefaults() xaiquota.Config {
+	// management_url/key may be empty in pure CPA yaml; resolved at call time (mgmt_resolve.go).
 	return xaiquota.Defaults()
 }
 
@@ -21,8 +22,8 @@ func configFields() []pluginapi.ConfigField {
 		{Name: "quota_guard_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "额度管控功能开关（UI 切换写入此字段；默认跟随 enabled）"},
 		{Name: "tick_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "到期恢复扫描周期(秒)"},
 		{Name: "max_reset_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "允许的最大重置等待(秒)，超过则不禁用"},
-		{Name: "management_url", Type: pluginapi.ConfigFieldTypeString, Description: "CPA 管理 API 基址"},
-		{Name: "management_key", Type: pluginapi.ConfigFieldTypeString, Description: "CPA X-Management-Key（敏感，不回显）"},
+		{Name: "management_url", Type: pluginapi.ConfigFieldTypeString, Description: "CPA 管理 API 基址（可空：默认 http://127.0.0.1:8317 或 CPA_MANAGEMENT_BASE_URL；纯 CPA 同机即可）"},
+		{Name: "management_key", Type: pluginapi.ConfigFieldTypeString, Description: "CPA X-Management-Key（敏感；可空时读 CPA_MANAGEMENT_KEY/MANAGEMENT_PASSWORD）"},
 		{Name: "state_path", Type: pluginapi.ConfigFieldTypeString, Description: "状态持久化 JSON 路径"},
 		{Name: "min_reset_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "最小冷却等待(秒)，0=不限制"},
 		{Name: "include_unobserved_quota_est", Type: pluginapi.ConfigFieldTypeBoolean, Description: "总额度是否计入未观测账号×默认2M（默认开；关则仅已知 rolling limit）"},
@@ -53,6 +54,7 @@ func parseConfigFromReconfigure(request []byte) xaiquota.Config {
 	}
 	if yamlBytes, ok := extractYAMLBytes(raw); ok {
 		applyYAMLConfig(&cfg, yamlBytes)
+		normalizeRuntimeConfig(&cfg)
 		return cfg
 	}
 	configMap := raw
@@ -164,6 +166,7 @@ func applyConfigMap(cfg *xaiquota.Config, m map[string]any) {
 	if v, ok := asFloat(m["patrol_initial_delay_sec"]); ok && v >= 0 {
 		cfg.PatrolInitialDelaySec = v
 	}
+
 }
 
 func asBool(v any) (bool, bool) {

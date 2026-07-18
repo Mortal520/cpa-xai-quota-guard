@@ -346,11 +346,7 @@ func (g *Guard) HandleUsage(ev UsageEvent) {
 }
 
 func (g *Guard) disableForMatch(authIndex string, ev UsageEvent, match MatchResult) {
-	cfg := g.Config()
-	if cfg.ManagementURL == "" || cfg.ManagementKey == "" {
-		g.logf("warn", "management 未配置，仅记录不禁用 auth=%s recover_at=%s", authIndex, match.RecoverAt.Format(time.RFC3339))
-		return
-	}
+	// management_url/key may be empty in pure CPA yaml; dynamicAuth resolves env/default at call time.
 	if g.auth == nil {
 		g.logf("error", "auth lookup 未注入，跳过禁用 auth=%s", authIndex)
 		return
@@ -471,7 +467,7 @@ func (g *Guard) Tick() {
 	if !cfg.Enabled {
 		return
 	}
-	if cfg.ManagementURL == "" || cfg.ManagementKey == "" || g.auth == nil {
+	if g.auth == nil {
 		return
 	}
 	due := g.storeDue(time.Now())
@@ -509,9 +505,8 @@ func (g *Guard) Tick() {
 
 
 func (g *Guard) deleteForDeadCredential(authIndex string, ev UsageEvent) {
-	cfg := g.Config()
-	if cfg.ManagementURL == "" || cfg.ManagementKey == "" || g.auth == nil {
-		g.logf("warn", "死号删除但 management 未配置，无法删除 auth=%s", authIndex)
+	if g.auth == nil {
+		g.logf("warn", "死号删除但 auth 未注入，无法删除 auth=%s", authIndex)
 		return
 	}
 	current, err := g.findAuth(authIndex)
@@ -883,11 +878,12 @@ func (g *Guard) HealthCheck() map[string]any {
 		st = g.store.GetUsageStats()
 	}
 	st = *EnsureUsageStats(&st)
-	mgmtOK := cfg.ManagementURL != "" && cfg.ManagementKey != ""
+	// Process-side: key may come from env; URL defaults to 127.0.0.1:8317 at mgmt call site.
+	mgmtOK := g.auth != nil
 	authOK := false
 	authErr := ""
 	xaiN := 0
-	if g.auth != nil && mgmtOK {
+	if g.auth != nil {
 		files, err := g.auth.List()
 		if err != nil {
 			authErr = err.Error()

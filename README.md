@@ -1,10 +1,16 @@
+## 纯 CPA（无 CPAMP）
+
+CPAMP 为**可选项**。仅配置 CPA `management_key`（`management_url` 可省略，默认 `http://127.0.0.1:8317`）即可冷却 / 恢复 / 巡查。详见 [docs/PURE_CPA.md](./docs/PURE_CPA.md)。
+
+页面「配置元信息」会区分：浏览器 localStorage Key（调插件 API）与进程侧 management（调 auth-files）。未填浏览器 Key 时不要误判为服务器 empty。
+
 # cpa-xai-quota-guard
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.15-blue.svg)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.18-blue.svg)](./CHANGELOG.md)
 [![Release](https://img.shields.io/github/v/release/Mortal520/cpa-xai-quota-guard)](https://github.com/Mortal520/cpa-xai-quota-guard/releases)
 
-CLIProxyAPI **原生 Go 插件**（**0.3.15**）：只管控 **xAI** 凭证——额度冷却、死号删除、主动/定时巡查、管理 UI。
+CLIProxyAPI **原生 Go 插件**（**0.3.18**）：只管控 **xAI** 凭证——额度冷却、死号删除、主动/定时巡查、管理 UI。
 
 | | |
 |--|--|
@@ -37,10 +43,10 @@ plugins:
 
 1. 写入/合并上述配置并**重启 CPA**
 2. 管理中心 → **插件商店** → **xAI Quota Guard** → 安装
-3. 插件菜单打开配置页；确认 state 中 `version == 0.3.15`
+3. 插件菜单打开配置页；确认 state 中 `version == 0.3.18`
 
 商店从 GitHub Release 拉 zip，CPA 能访问 GitHub（或你配置的加速）时可用。  
-**502 / plugin_install_failed**：资产名必须是 `cpa-xai-quota-guard_{version}_{goos}_{goarch}.zip`，库在 zip **根目录**，且 Release 带 `checksums.txt`。v0.3.10 起已按此布局发布；当前代码 **0.3.15**（商店资产需对应 Release tag）。详见 [docs/INSTALL.md](./docs/INSTALL.md)。
+**502 / plugin_install_failed**：资产名必须是 `cpa-xai-quota-guard_{version}_{goos}_{goarch}.zip`，库在 zip **根目录**，且 Release 带 `checksums.txt`。v0.3.10 起已按此布局发布；当前代码 **0.3.18**（商店资产需对应 Release tag）。详见 [docs/INSTALL.md](./docs/INSTALL.md)。
 
 ## 其它安装方式
 
@@ -63,13 +69,13 @@ plugins:
 ## 能力摘要
 
 - **仅 xAI**：其它 provider 一律忽略
-- **429 free-usage-exhausted**（rolling 24h）→ `plugin_auto` 临时禁用；**恢复锚点=首次禁用+24h**，复检 soft 不后推时钟（0.3.15）；到期 Tick 自动启用并离开冷却列表；巡查 200 可提前恢复
+- **429 free-usage-exhausted**（rolling 24h）→ `plugin_auto` 临时禁用；**恢复锚点=首次禁用+24h**，复检 soft 不后推时钟（0.3.18）；到期 Tick 自动启用并离开冷却列表；巡查 200 可提前恢复
 - **402 spending-limit** → 冷却、不删除；巡查探测恢复后可启用
 - **401 / 真 403 权限** → 删除凭证
 - **区域/模型不可用、426、404/5xx、网络** → 不删（日志/分桶）
 - **用户手动禁用**永不自动启用；仅恢复本插件自动禁用的号
 - **主动/定时巡查**、弹性并发、网络闸门（连续传输失败时检测公网/代理并中止）
-- **主题跟随 CPA/CPAMP**（无插件独立深浅色开关；0.3.10 起深色 token 协调；0.3.11 日池默认 2M；0.3.15 修复 soft 冷却时钟）
+- **主题跟随 CPA/CPAMP**（无插件独立深浅色开关；0.3.10 起深色 token 协调；0.3.11 日池默认 2M；0.3.18 修复 soft 冷却时钟）
 
 完整错误矩阵与设计：[DESIGN.md](./DESIGN.md) · 变更记录：[CHANGELOG.md](./CHANGELOG.md)
 
@@ -93,7 +99,7 @@ curl -sS -H "X-Management-Key: <KEY>" \
   "http://127.0.0.1:8317/v0/management/cpa-xai-quota-guard/state?view=focus"
 ```
 
-期望含 `"version":"0.3.15"`。
+期望含 `"version":"0.3.18"`。
 
 ## 文档
 

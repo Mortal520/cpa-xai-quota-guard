@@ -245,3 +245,8 @@ checksums.txt
 ## 开源协议
 
 MIT，见仓库根目录 [LICENSE](../LICENSE)。界面预览见 [screenshots](./screenshots/)。发版见 [RELEASE.md](./RELEASE.md)。
+
+## 纯 CPA（无 CPAMP）
+
+见 [PURE_CPA.md](./PURE_CPA.md)。
+

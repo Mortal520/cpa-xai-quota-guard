@@ -72,3 +72,7 @@ _reltest/
 _test_out.txt
 _push_log.txt
 
+
+tasks/
+TASK_INDEX.md
+

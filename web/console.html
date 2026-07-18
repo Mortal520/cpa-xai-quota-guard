@@ -284,7 +284,7 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
       <div class="row">
         <button class="primary on" id="btnToggle" onclick="togglePlugin()" title="切换插件总开关"><span class="status-dot on" id="enDot"></span><span id="enBtnText">加载中…</span></button>
         <button onclick="forceReloadState()">刷新</button>
-        <button onclick="runBackfill()" id="btnBackfill" title="从 CPAMP 回补今日真实 token 用量">CPAMP 回补</button>
+        <button onclick="runBackfill()" id="btnBackfill" title="可选：从 CPAMP 回补今日真实 token（纯 CPA 可不配）">CPAMP 回补</button>
         <button onclick="resetTodayUsage()" id="btnResetToday" title="仅清零日历今日已用/请求，不影响累计与冷却状态">清零今日已用</button>
         <button onclick="runHealth()" id="btnHealth">自检</button>
         <button onclick="exportUsage()">导出JSON</button>
@@ -315,13 +315,14 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
     <div id="recoverTip" class="guide" style="display:none;margin-top:.75rem"></div>
   </div>
   <div class="card">
-    <div class="card-title">管理 API 鉴权</div><div class="card-desc">Key 仅存本机浏览器 localStorage，不写回服务器配置明文。</div>
-    <div class="guide" id="cfgGuide">请填写 X-Management-Key 并保存；该 key 仅保存在本机浏览器 localStorage，不会写回插件配置面板以外的明文日志。</div>
+    <div class="card-title">管理 API 鉴权</div><div class="card-desc">纯 CPA 即可使用（CPAMP 可选）。浏览器 Key 仅存本机 localStorage，与服务器 yaml 中的 management_key 用途不同。</div>
+    <div class="guide" id="cfgGuide">请填写 CPA 的 X-Management-Key 并保存。页面用它调用本插件管理 API；插件进程内禁用/恢复凭证则使用 yaml 或环境变量 CPA_MANAGEMENT_KEY（可与页面 Key 相同）。未配 CPAMP 时「回补」不可用，冷却/巡查不受影响。</div>
     <div class="row">
       <input id="cfgKey" type="password" placeholder="X-Management-Key" style="flex:1;min-width:220px">
       <button class="primary" onclick="saveKey()">保存 Key</button>
     </div>
-    <div class="muted" style="margin-top:.45rem;font-size:.82rem" id="cfgMeta">management_url / key 状态加载中…</div>
+    <div class="muted" style="margin-top:.45rem;font-size:.82rem" id="cfgMeta">配置元信息加载中…</div>
+    <div class="muted" style="margin-top:.25rem;font-size:.78rem" id="cfgKeyHint"></div>
   </div>
   <div class="card" id="patrolCard">
     <div class="row" style="justify-content:space-between;gap:.5rem;margin-bottom:.35rem">
@@ -487,6 +488,77 @@ const API = "/v0/management/cpa-xai-quota-guard";
 const KEY_LS = "cpaXaiQgKey";
 function mgmtKey(){ return localStorage.getItem(KEY_LS) || ""; }
 function setMgmtKey(v){ localStorage.setItem(KEY_LS, v || ""); }
+/** Absorb grok-inspection: try host management panel remembered key (same-origin). */
+function tryAutoFillManagementKey(){
+  if(mgmtKey()) return false;
+  var candidates = [];
+  try {
+    for(var i=0;i<localStorage.length;i++){
+      var k = localStorage.key(i);
+      if(!k) continue;
+      if(/management|mgmt|cli-proxy/i.test(k)) candidates.push(k);
+    }
+  } catch(e){}
+  var names = ["managementKey","cli-proxy-management-key","cpa-management-key","CPA_MANAGEMENT_KEY"].concat(candidates);
+  for(var n=0;n<names.length;n++){
+    try {
+      var raw = localStorage.getItem(names[n]);
+      if(!raw) continue;
+      var v = raw;
+      try {
+        var parsed = JSON.parse(raw);
+        if(parsed && typeof parsed === "object"){
+          v = parsed.managementKey || parsed.management_key || parsed.key || parsed.password || "";
+        }
+      } catch(e2){}
+      v = String(v||"").trim();
+      if(v && v.length >= 4 && v.length < 512){
+        setMgmtKey(v);
+        return true;
+      }
+    } catch(e3){}
+  }
+  return false;
+}
+function paintCfgMeta(cfg, s){
+  cfg = cfg || {};
+  s = s || {};
+  var meta = document.getElementById("cfgMeta");
+  var hint = document.getElementById("cfgKeyHint");
+  var browserKey = !!mgmtKey();
+  var srcMap = {config:"yaml配置", env:"环境变量", default:"默认127.0.0.1"};
+  var src = srcMap[cfg.management_source] || (cfg.management_url_configured ? "yaml配置" : "自动解析");
+  var pure = !!cfg.pure_cpa_mode || !(cfg.cpamp_url);
+  var lines = [];
+  lines.push("进程管理API " + (cfg.management_url || "(未解析)"));
+  lines.push("来源 " + src);
+  lines.push("进程Key " + (cfg.management_key_set ? "已配置" : "未配置"));
+  lines.push("浏览器Key " + (browserKey ? "已保存" : "未填"));
+  lines.push("tick " + (cfg.tick_seconds!=null?cfg.tick_seconds:"-") + "s");
+  lines.push(pure ? "纯CPA(CPAMP可选未配)" : ("CPAMP " + (cfg.cpamp_url||"")));
+  if(cfg.state_path) lines.push("state " + cfg.state_path);
+  if(s.hot_hidden>0) lines.push("focus截断 "+s.hot_shown+"/"+s.hot_total);
+  if(meta) meta.textContent = lines.join(" · ");
+  if(hint){
+    if(!browserKey){
+      hint.innerHTML = '<span class="err">页面 Key 未设置：下方状态/巡查无法加载。请填写 X-Management-Key 后点保存（仅浏览器本地，不是服务器 empty 配置）。</span>';
+    } else if(!cfg.management_key_set){
+      hint.innerHTML = '<span class="err">服务器进程侧 management_key 未配置：yaml 或环境变量 CPA_MANAGEMENT_KEY / MANAGEMENT_PASSWORD。页面能看状态，但自动禁用/恢复/巡查写凭证会失败。</span>';
+    } else {
+      hint.textContent = pure
+        ? "纯 CPA 模式正常：冷却/恢复/巡查仅依赖 CPA management；CPAMP 回补为可选项。"
+        : "已联接 CPAMP（回补可用）。核心管控仍走 CPA management。";
+    }
+  }
+  var bf = document.getElementById("btnBackfill");
+  if(bf){
+    var hasCpamp = !!(cfg.cpamp_url && cfg.cpamp_admin_key_set);
+    bf.disabled = !hasCpamp;
+    bf.title = hasCpamp ? "从 CPAMP 回补今日真实 token 用量" : "未配置 CPAMP（可选）— 纯 CPA 不需要回补也能冷却/巡查";
+    bf.style.opacity = hasCpamp ? "1" : "0.55";
+  }
+}
+
 // Theme: follow CPA / CPAMP host shell; fallback system night mode (no local toggle).
 function detectHostTheme(){
   var attrHit = "";
@@ -1293,6 +1365,10 @@ async function resetTodayUsage(){
   }
 }
 async function runBackfill(){
+  if(LAST_STATE && LAST_STATE.config && (LAST_STATE.config.pure_cpa_mode || !LAST_STATE.config.cpamp_url)){
+    alert("当前为纯 CPA 模式（未配置 CPAMP）。\n回补为可选项，不影响冷却/恢复/巡查。\n如需回补，请在插件 yaml 配置 cpamp_url + cpamp_admin_key。");
+    return;
+  }
   const r = await api("backfill", {method:"POST", body:{}});
   if(!r || !r.ok){ alert("回补失败: "+(r&&r.error?JSON.stringify(r.error):"无响应")); return; }
   const d = r.result || {};
@@ -1326,8 +1402,15 @@ function clearLoadingUI(errMsg){
     txt.textContent = errMsg ? "加载失败" : "—";
   }
   const meta = document.getElementById("cfgMeta");
-  if(meta && /加载中/.test(meta.textContent||"")){
-    meta.textContent = errMsg ? ("加载失败: " + errMsg) : "—";
+  if(meta && (/加载中|配置元信息加载中/.test(meta.textContent||"") || errMsg)){
+    if(errMsg === "no key"){
+      meta.textContent = "浏览器未保存 Management Key — 不是服务器 management_url empty";
+      paintCfgMeta({}, {});
+    } else if(errMsg){
+      meta.textContent = "加载失败: " + errMsg;
+    } else if(/加载中|配置元信息加载中/.test(meta.textContent||"")){
+      meta.textContent = "—";
+    }
   }
 }
 function forceReloadState(){
@@ -1391,19 +1474,7 @@ async function loadState(opts){
       // non-blocking note appended via status sub line
     }
     const cfg = d.config || {};
-    const meta = document.getElementById("cfgMeta");
-    if(meta){
-      meta.textContent =
-        "management_url=" + (cfg.management_url||"(empty)") +
-        " · key_set=" + !!cfg.management_key_set +
-        " · tick=" + (cfg.tick_seconds||"-") + "s" +
-        " · max_reset=" + (cfg.max_reset_seconds||"-") + "s" +
-        " · state_path=" + (cfg.state_path||"-") +
-        " · cpamp=" + (cfg.cpamp_url||"(未配)") +
-        " · min_reset=" + (cfg.min_reset_seconds||0) +
-        " · unobs_est=" + !!cfg.include_unobserved_quota_est +
-        (s.hot_hidden>0 ? (" · focus热账号截断 "+s.hot_shown+"/"+s.hot_total) : "");
-    }
+    try{ paintCfgMeta(cfg, s); }catch(e){ console.warn("paintCfgMeta", e); }
     // patrol form: fill ONLY once (or explicit force). Never periodic rewrite of proxy/model.
     // Bugfix: condition was (!dirty || !applied) which is true whenever dirty=false → 15s overwrite.
     var ph = document.getElementById("patrolCfgHint");
@@ -1743,9 +1814,11 @@ async function togglePlugin(){
   }
 }
 (function init(){
+  try{ tryAutoFillManagementKey(); }catch(e){}
   const k = mgmtKey();
   if(k) document.getElementById("cfgKey").value = k;
   try{ bindPatrolFormDirty(); }catch(e){}
+  if(!k){ try{ paintCfgMeta({}, {}); }catch(e){} }
   loadState();
   // accounts/metrics sync only — form is not rewritten after first fill
   scheduleStatePoll();

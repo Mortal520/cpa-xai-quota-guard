@@ -27,9 +27,10 @@ type mgmtAuth struct {
 }
 
 func newMgmtAuth(cfg xaiquota.Config) *mgmtAuth {
+	// Pure CPA: empty yaml management_url/key still resolve via env + 127.0.0.1:8317 (see mgmt_resolve.go).
 	return &mgmtAuth{
-		url: strings.TrimRight(strings.TrimSpace(cfg.ManagementURL), "/"),
-		key: strings.TrimSpace(cfg.ManagementKey),
+		url: resolveManagementBaseURL(cfg.ManagementURL),
+		key: resolveManagementKey(cfg.ManagementKey),
 	}
 }
 
@@ -286,7 +287,7 @@ func (m *mgmtAuth) Delete(authIndex string) error {
 }
 
 func mgmtHTTPDelete(target, key string) error {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := newMgmtHTTPClient(15 * time.Second)
 	req, err := http.NewRequest(http.MethodDelete, target, nil)
 	if err != nil {
 		return err
@@ -322,7 +323,7 @@ func urlEncode(s string) string {
 	return b.String()
 }
 func mgmtHTTP(method, target string, body []byte, key string) ([]byte, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := newMgmtHTTPClient(15 * time.Second)
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -354,12 +355,13 @@ func mgmtHTTP(method, target string, body []byte, key string) ([]byte, error) {
 // writePluginConfig merges patch into CPA plugin config and PUTs full config back.
 // CPA partial PUT replaces the whole plugin config block, so we always GET+merge first.
 func writePluginConfig(cfg xaiquota.Config, patch map[string]any) error {
-	if cfg.ManagementURL == "" || cfg.ManagementKey == "" {
-		return fmt.Errorf("management not configured")
+	base := resolveManagementBaseURL(cfg.ManagementURL)
+	key := resolveManagementKey(cfg.ManagementKey)
+	if base == "" || key == "" {
+		return fmt.Errorf("management not configured (set management_url/key or CPA_MANAGEMENT_BASE_URL / CPA_MANAGEMENT_KEY)")
 	}
-	base := strings.TrimRight(strings.TrimSpace(cfg.ManagementURL), "/")
 	target := base + "/v0/management/plugins/" + pluginID + "/config"
-	raw, err := mgmtHTTP(http.MethodGet, target, nil, cfg.ManagementKey)
+	raw, err := mgmtHTTP(http.MethodGet, target, nil, key)
 	if err != nil {
 		return fmt.Errorf("get plugin config: %w", err)
 	}
@@ -377,7 +379,7 @@ func writePluginConfig(cfg xaiquota.Config, patch map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if _, err := mgmtHTTP(http.MethodPut, target, body, cfg.ManagementKey); err != nil {
+	if _, err := mgmtHTTP(http.MethodPut, target, body, key); err != nil {
 		return fmt.Errorf("put plugin config: %w", err)
 	}
 	return nil
