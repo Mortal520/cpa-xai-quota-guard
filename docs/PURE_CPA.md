@@ -1,3 +1,14 @@
+
+### Management Key（同一把，0.3.19+）
+
+浏览器填写的 Key **就是** 进程调用 auth-files 的 Key。点「保存并同步进程」后：
+
+1. localStorage（页面调插件 API）
+2. 插件进程内存（立即用于禁用/恢复/巡查）
+3. 尽量写入插件 yaml `management_key`（重启后仍有效）
+
+也可在任意管理请求的 `X-Management-Key` 头里携带，进程会自动采用。
+
 ## 纯 CPA 最小配置（0.3.18+）
 
 插件**不依赖 CPAMP**。只要 CPA 自身 management API 可达，即可完成冷却 / 到期恢复 / 主动巡查。

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.20
+
+### 对齐 grok-inspection 的纯 CPA 体验
+- 自动从 CPA 管理面板 localStorage 读取 Management Key（支持 `enc::v1::` 混淆解密，算法同 grok-inspection）
+- 打开配置页自动 bind-key：浏览器 Key = 进程 Key，尽量持久化 yaml
+- 不依赖 CPAMP；URL 默认 `http://127.0.0.1:8317` / 环境变量
+- UI 文案：单 Key，自动填充提示
+
+
+## 0.3.19
+
+### 纯 CPA 单 Key
+- 浏览器与进程共用同一把 CPA X-Management-Key
+- 保存 / 自动 bind-key：进程内存 + 尽量持久化 yaml
+- 每次管理请求从请求头采用 Key
+- cfgMeta 不再拆成「浏览器 Key / 进程 Key」误导
+
+
 ## 0.3.18
 
 ### 纯 CPA 兼容（吸收 grok-inspection）

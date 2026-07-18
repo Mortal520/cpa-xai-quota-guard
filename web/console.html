@@ -315,11 +315,11 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
     <div id="recoverTip" class="guide" style="display:none;margin-top:.75rem"></div>
   </div>
   <div class="card">
-    <div class="card-title">管理 API 鉴权</div><div class="card-desc">纯 CPA 即可使用（CPAMP 可选）。浏览器 Key 仅存本机 localStorage，与服务器 yaml 中的 management_key 用途不同。</div>
-    <div class="guide" id="cfgGuide">请填写 CPA 的 X-Management-Key 并保存。页面用它调用本插件管理 API；插件进程内禁用/恢复凭证则使用 yaml 或环境变量 CPA_MANAGEMENT_KEY（可与页面 Key 相同）。未配 CPAMP 时「回补」不可用，冷却/巡查不受影响。</div>
+    <div class="card-title">管理 API 鉴权</div><div class="card-desc">纯 CPA（不依赖 CPAMP）：自动读取 CPA 管理面板 Key（同 grok-inspection）；浏览器与进程同一把 Key。</div>
+    <div class="guide" id="cfgGuide">优先：登录 CPA 管理面板并记住密码 → 本页自动填充 Key 并同步进程。也可手填。CPAMP 完全可选。</div>
     <div class="row">
       <input id="cfgKey" type="password" placeholder="X-Management-Key" style="flex:1;min-width:220px">
-      <button class="primary" onclick="saveKey()">保存 Key</button>
+      <button class="primary" onclick="saveKey()">保存并同步进程</button>
     </div>
     <div class="muted" style="margin-top:.45rem;font-size:.82rem" id="cfgMeta">配置元信息加载中…</div>
     <div class="muted" style="margin-top:.25rem;font-size:.78rem" id="cfgKeyHint"></div>
@@ -486,68 +486,153 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
 <script>
 const API = "/v0/management/cpa-xai-quota-guard";
 const KEY_LS = "cpaXaiQgKey";
-function mgmtKey(){ return localStorage.getItem(KEY_LS) || ""; }
-function setMgmtKey(v){ localStorage.setItem(KEY_LS, v || ""); }
-/** Absorb grok-inspection: try host management panel remembered key (same-origin). */
-function tryAutoFillManagementKey(){
-  if(mgmtKey()) return false;
-  var candidates = [];
+// Same-origin CPA management base (page). Process-side defaults to 127.0.0.1:8317 (see mgmt_resolve.go).
+const PAGE_MGMT_ORIGIN = (typeof location !== "undefined" && location.origin) ? location.origin : "";
+
+function mgmtKey(){ return localStorage.getItem(KEY_LS) || sessionStorage.getItem(KEY_LS) || ""; }
+function setMgmtKey(v){
+  v = String(v == null ? "" : v);
+  try { localStorage.setItem(KEY_LS, v); } catch(e){}
+  try { sessionStorage.setItem(KEY_LS, v); } catch(e){}
+}
+
+// Match Cli-Proxy-API-Management-Center reversible localStorage (enc::v1::) — same as grok-inspection.
+// Not a security boundary; only so we can reuse the panel's saved key.
+const PANEL_ENC_PREFIX = "enc::v1::";
+const PANEL_SECRET_SALT = "cli-proxy-api-webui::secure-storage";
+var KEY_SOURCE = "manual"; // panel | plugin | manual
+
+function panelKeyBytes(){
   try {
-    for(var i=0;i<localStorage.length;i++){
-      var k = localStorage.key(i);
-      if(!k) continue;
-      if(/management|mgmt|cli-proxy/i.test(k)) candidates.push(k);
+    return new TextEncoder().encode(PANEL_SECRET_SALT + "|" + location.host + "|" + navigator.userAgent);
+  } catch(e){
+    return new TextEncoder().encode(PANEL_SECRET_SALT);
+  }
+}
+function deobfuscatePanelValue(payload){
+  var raw = String(payload == null ? "" : payload);
+  if(!raw || raw.indexOf(PANEL_ENC_PREFIX) !== 0) return raw;
+  try {
+    var b64 = raw.slice(PANEL_ENC_PREFIX.length);
+    var binary = atob(b64);
+    var encrypted = new Uint8Array(binary.length);
+    for(var i=0;i<binary.length;i++) encrypted[i] = binary.charCodeAt(i);
+    var key = panelKeyBytes();
+    var out = new Uint8Array(encrypted.length);
+    for(var j=0;j<encrypted.length;j++) out[j] = encrypted[j] ^ key[j % key.length];
+    return new TextDecoder().decode(out);
+  } catch(e){ return raw; }
+}
+function tryParseJSON(text){
+  try { return JSON.parse(text); } catch(e){ return null; }
+}
+function extractKeyFromPanelStorage(){
+  try {
+    // Zustand persist key used by Management Center auth store.
+    var authRaw = localStorage.getItem("cli-proxy-auth");
+    if(authRaw){
+      var parsed = tryParseJSON(deobfuscatePanelValue(authRaw));
+      var key = (parsed && parsed.state && parsed.state.managementKey)
+        || (parsed && parsed.managementKey)
+        || "";
+      if(String(key).trim()) return String(key).trim();
     }
-  } catch(e){}
-  var names = ["managementKey","cli-proxy-management-key","cpa-management-key","CPA_MANAGEMENT_KEY"].concat(candidates);
-  for(var n=0;n<names.length;n++){
-    try {
+    // Legacy plaintext / obfuscated single-key entries.
+    var names = ["managementKey","cli-proxy-management-key","cpa-management-key","CPA_MANAGEMENT_KEY"];
+    for(var n=0;n<names.length;n++){
       var raw = localStorage.getItem(names[n]);
       if(!raw) continue;
-      var v = raw;
+      var plain = deobfuscatePanelValue(raw);
+      var p2 = tryParseJSON(plain);
+      if(typeof p2 === "string" && p2.trim()) return p2.trim();
+      if(p2 && typeof p2 === "object"){
+        var k2 = p2.managementKey || p2.management_key || p2.key || p2.password || "";
+        if(String(k2).trim()) return String(k2).trim();
+      }
+      if(plain && plain.indexOf(PANEL_ENC_PREFIX) !== 0 && plain.trim()) return plain.trim();
+    }
+    // Scan other keys that look like panel auth stores.
+    for(var i=0;i<localStorage.length;i++){
+      var name = localStorage.key(i);
+      if(!name || !/cli-proxy|management|mgmt/i.test(name)) continue;
+      if(names.indexOf(name) >= 0 || name === KEY_LS) continue;
       try {
-        var parsed = JSON.parse(raw);
-        if(parsed && typeof parsed === "object"){
-          v = parsed.managementKey || parsed.management_key || parsed.key || parsed.password || "";
+        var raw2 = localStorage.getItem(name);
+        if(!raw2) continue;
+        var plain2 = deobfuscatePanelValue(raw2);
+        var p3 = tryParseJSON(plain2);
+        if(p3 && typeof p3 === "object"){
+          var k3 = (p3.state && p3.state.managementKey) || p3.managementKey || p3.management_key || "";
+          if(String(k3).trim().length >= 4) return String(k3).trim();
         }
       } catch(e2){}
-      v = String(v||"").trim();
-      if(v && v.length >= 4 && v.length < 512){
-        setMgmtKey(v);
-        return true;
-      }
-    } catch(e3){}
-  }
-  return false;
+    }
+  } catch(e){}
+  return "";
 }
+/** Absorb grok-inspection: auto-load CPA Management Key from panel or local plugin store. */
+function tryAutoFillManagementKey(){
+  var own = "";
+  try { own = localStorage.getItem(KEY_LS) || sessionStorage.getItem(KEY_LS) || ""; } catch(e){}
+  own = String(own||"").trim();
+  if(own){
+    KEY_SOURCE = "plugin";
+    return { filled: true, source: "plugin", key: own };
+  }
+  var panel = extractKeyFromPanelStorage();
+  if(panel){
+    setMgmtKey(panel);
+    KEY_SOURCE = "panel";
+    return { filled: true, source: "panel", key: panel };
+  }
+  KEY_SOURCE = "manual";
+  return { filled: false, source: "manual", key: "" };
+}
+function syncKeyUIHint(){
+  var hint = document.getElementById("cfgKeyHint");
+  var input = document.getElementById("cfgKey");
+  if(!hint) return;
+  var k = mgmtKey();
+  if(k && KEY_SOURCE === "panel"){
+    hint.textContent = "已从 CPA 管理面板自动读取 Key（与 grok-inspection 相同算法；无需手填）。保存会同步到插件进程。";
+    if(input) input.placeholder = "已自动填充（可改）";
+  } else if(k && KEY_SOURCE === "plugin"){
+    hint.textContent = "已使用本插件本地保存的 Key（与进程共用同一把）。";
+  } else if(!k){
+    hint.innerHTML = '<span class="err">未读到 Key：请先登录 CPA /management.html 并勾选记住密码，或在此手动填写后点「保存并同步进程」。</span>';
+  }
+}
+
 function paintCfgMeta(cfg, s){
   cfg = cfg || {};
   s = s || {};
   var meta = document.getElementById("cfgMeta");
   var hint = document.getElementById("cfgKeyHint");
   var browserKey = !!mgmtKey();
-  var srcMap = {config:"yaml配置", env:"环境变量", default:"默认127.0.0.1"};
-  var src = srcMap[cfg.management_source] || (cfg.management_url_configured ? "yaml配置" : "自动解析");
+  var keyOk = !!(cfg.management_key_set || browserKey);
+  var keySrcMap = {config:"已持久化", browser:"页面同步", env:"环境变量", none:"未配置"};
+  var keySrc = keySrcMap[cfg.management_key_source] || (cfg.management_key_set ? "已就绪" : (browserKey ? "页面已填" : "未配置"));
+  var urlSrcMap = {config:"yaml", env:"环境变量", default:"默认127.0.0.1"};
+  var urlSrc = urlSrcMap[cfg.management_source] || (cfg.management_url_configured ? "yaml" : "自动");
   var pure = !!cfg.pure_cpa_mode || !(cfg.cpamp_url);
   var lines = [];
-  lines.push("进程管理API " + (cfg.management_url || "(未解析)"));
-  lines.push("来源 " + src);
-  lines.push("进程Key " + (cfg.management_key_set ? "已配置" : "未配置"));
-  lines.push("浏览器Key " + (browserKey ? "已保存" : "未填"));
+  lines.push("Management " + (cfg.management_url || "http://127.0.0.1:8317") + " (" + urlSrc + ")");
+  lines.push("Key " + (keyOk ? ("就绪 · " + keySrc) : "未配置"));
   lines.push("tick " + (cfg.tick_seconds!=null?cfg.tick_seconds:"-") + "s");
-  lines.push(pure ? "纯CPA(CPAMP可选未配)" : ("CPAMP " + (cfg.cpamp_url||"")));
+  lines.push(pure ? "纯CPA" : ("CPAMP " + (cfg.cpamp_url||"")));
   if(cfg.state_path) lines.push("state " + cfg.state_path);
   if(s.hot_hidden>0) lines.push("focus截断 "+s.hot_shown+"/"+s.hot_total);
   if(meta) meta.textContent = lines.join(" · ");
   if(hint){
     if(!browserKey){
-      hint.innerHTML = '<span class="err">页面 Key 未设置：下方状态/巡查无法加载。请填写 X-Management-Key 后点保存（仅浏览器本地，不是服务器 empty 配置）。</span>';
+      hint.innerHTML = '<span class="err">未读到 Key：请先登录 CPA 管理面板并记住密码，或手动填写后点「保存并同步进程」。纯 CPA 只需这一把 Key，不依赖 CPAMP。</span>';
     } else if(!cfg.management_key_set){
-      hint.innerHTML = '<span class="err">服务器进程侧 management_key 未配置：yaml 或环境变量 CPA_MANAGEMENT_KEY / MANAGEMENT_PASSWORD。页面能看状态，但自动禁用/恢复/巡查写凭证会失败。</span>';
+      hint.textContent = "Key 已就绪（" + (KEY_SOURCE==="panel"?"管理面板":"本地") + "），正在/可同步到进程… 点「保存并同步进程」可持久化。被动冷却在同步后生效。";
     } else {
+      var src = (cfg.management_key_source==="browser"?"页面同步":(cfg.management_key_source==="config"?"已持久化":(cfg.management_key_source||"就绪")));
       hint.textContent = pure
-        ? "纯 CPA 模式正常：冷却/恢复/巡查仅依赖 CPA management；CPAMP 回补为可选项。"
-        : "已联接 CPAMP（回补可用）。核心管控仍走 CPA management。";
+        ? ("纯 CPA 就绪 · Key " + src + " · 不依赖 CPAMP · 冷却/恢复/巡查可用")
+        : ("Key " + src + " · CPAMP 已配（回补可选）· 核心管控走 CPA");
     }
   }
   var bf = document.getElementById("btnBackfill");
@@ -558,8 +643,6 @@ function paintCfgMeta(cfg, s){
     bf.style.opacity = hasCpamp ? "1" : "0.55";
   }
 }
-
-// Theme: follow CPA / CPAMP host shell; fallback system night mode (no local toggle).
 function detectHostTheme(){
   var attrHit = "";
   var classHit = "";
@@ -1474,6 +1557,14 @@ async function loadState(opts){
       // non-blocking note appended via status sub line
     }
     const cfg = d.config || {};
+    try{
+      if(mgmtKey() && cfg && cfg.management_key_set === false && !window._KEY_AUTOBIND_DONE){
+        window._KEY_AUTOBIND_DONE = true;
+        api("bind-key", {method:"POST", body:{key:mgmtKey(), persist:true}, timeout_ms:12000}).then(function(br){
+          if(br && br.ok){ loadState({force:true, soft:true}); }
+        }).catch(function(){});
+      }
+    }catch(e){}
     try{ paintCfgMeta(cfg, s); }catch(e){ console.warn("paintCfgMeta", e); }
     // patrol form: fill ONLY once (or explicit force). Never periodic rewrite of proxy/model.
     // Bugfix: condition was (!dirty || !applied) which is true whenever dirty=false → 15s overwrite.
@@ -1587,12 +1678,23 @@ function accountFingerprint(list){
   }).join("\n");
 }
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]);}); }
-function saveKey(){
+async function saveKey(){
   const v = document.getElementById("cfgKey").value.trim();
+  if(!v){ alert("请填写 CPA X-Management-Key"); return; }
   setMgmtKey(v);
-  loadState();
+  try{
+    const r = await api("bind-key", {method:"POST", body:{key:v, persist:true}, timeout_ms:15000});
+    if(!r || r.ok === false){
+      alert("Key 已存浏览器，但同步进程失败: " + (r && r.error ? (typeof r.error==="string"?r.error:JSON.stringify(r.error)) : "无响应"));
+    } else {
+      var res = r.result || r;
+      if(res && res.persisted === false && res.error){ console.warn("bind-key runtime only", res.error); }
+    }
+  }catch(e){
+    alert("同步进程异常: " + (e && e.message ? e.message : e));
+  }
+  loadState({force:true});
 }
-
 function ensurePatrolModelOption(id){
   if(!id) return;
   var sel = document.getElementById("cfgPatrolModel");
@@ -1814,12 +1916,22 @@ async function togglePlugin(){
   }
 }
 (function init(){
-  try{ tryAutoFillManagementKey(); }catch(e){}
+  var fill = {filled:false, source:"manual"};
+  try{ fill = tryAutoFillManagementKey() || fill; }catch(e){}
   const k = mgmtKey();
-  if(k) document.getElementById("cfgKey").value = k;
+  var inp = document.getElementById("cfgKey");
+  if(inp && k) inp.value = k;
+  try{ syncKeyUIHint(); }catch(e){}
   try{ bindPatrolFormDirty(); }catch(e){}
   if(!k){ try{ paintCfgMeta({}, {}); }catch(e){} }
-  loadState();
+  // Pure CPA: auto-bind panel/local key into process so cooldown/patrol work without manual yaml.
+  if(k){
+    api("bind-key", {method:"POST", body:{key:k, persist:true}, timeout_ms:12000}).then(function(br){
+      loadState({force:true});
+    }).catch(function(){ loadState(); });
+  } else {
+    loadState();
+  }
   // accounts/metrics sync only — form is not rewritten after first fill
   scheduleStatePoll();
   scheduleCountdown();

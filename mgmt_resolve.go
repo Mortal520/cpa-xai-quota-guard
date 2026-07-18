@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mortal/cpa-xai-quota-guard/internal/xaiquota"
@@ -14,6 +15,27 @@ import (
 
 // Default CPA management listen address (same default as CLIProxyAPI / grok-inspection).
 const defaultManagementBaseURL = "http://127.0.0.1:8317"
+
+// runtimeManagementKey is the same CPA X-Management-Key the browser uses.
+// Pure CPA: one key for page API + in-process auth-files disable/enable/delete.
+// Set from request headers on each management call, or via bind-key / save.
+var (
+	runtimeMgmtMu  sync.RWMutex
+	runtimeMgmtKey string
+)
+
+func setRuntimeManagementKey(key string) {
+	key = strings.TrimSpace(key)
+	runtimeMgmtMu.Lock()
+	runtimeMgmtKey = key
+	runtimeMgmtMu.Unlock()
+}
+
+func getRuntimeManagementKey() string {
+	runtimeMgmtMu.RLock()
+	defer runtimeMgmtMu.RUnlock()
+	return runtimeMgmtKey
+}
 
 func envTruthy(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
@@ -99,12 +121,69 @@ func resolveManagementBaseURL(cfgURL string) string {
 	return defaultManagementBaseURL
 }
 
-// resolveManagementKey: yaml/config key first, then process env for headless pure-CPA installs.
+// resolveManagementKey: one CPA management key for pure CPA.
+// Order: yaml/config → runtime (browser-bound) → env.
 func resolveManagementKey(cfgKey string) string {
 	if k := strings.TrimSpace(cfgKey); k != "" {
 		return k
 	}
+	if k := getRuntimeManagementKey(); k != "" {
+		return k
+	}
 	return firstNonEmpty(os.Getenv("MANAGEMENT_PASSWORD"), os.Getenv("CPA_MANAGEMENT_KEY"), os.Getenv("MANAGEMENT_KEY"))
+}
+
+// adoptManagementKeyFromHeaders mirrors grok-inspection: page X-Management-Key / Bearer
+// is the process key when yaml/env is empty (pure CPA single-key).
+func adoptManagementKeyFromHeaders(h http.Header) {
+	if h == nil {
+		return
+	}
+	key := ""
+	if v := strings.TrimSpace(h.Get("X-Management-Key")); v != "" {
+		key = v
+	} else {
+		for k, vals := range h {
+			if strings.EqualFold(strings.TrimSpace(k), "X-Management-Key") && len(vals) > 0 {
+				key = strings.TrimSpace(vals[0])
+				break
+			}
+		}
+	}
+	if key == "" {
+		auth := strings.TrimSpace(h.Get("Authorization"))
+		if auth == "" {
+			for k, vals := range h {
+				if strings.EqualFold(strings.TrimSpace(k), "Authorization") && len(vals) > 0 {
+					auth = strings.TrimSpace(vals[0])
+					break
+				}
+			}
+		}
+		const pfx = "bearer "
+		if len(auth) > len(pfx) && strings.EqualFold(auth[:len(pfx)], pfx) {
+			key = strings.TrimSpace(auth[len(pfx):])
+		}
+	}
+	if key == "" {
+		return
+	}
+	// Always refresh runtime to latest page key so process auth-files use the same secret.
+	setRuntimeManagementKey(key)
+}
+
+// managementKeySource reports how process key was resolved (no secret value).
+func managementKeySource(cfgKey string) string {
+	if strings.TrimSpace(cfgKey) != "" {
+		return "config"
+	}
+	if getRuntimeManagementKey() != "" {
+		return "browser"
+	}
+	if firstNonEmpty(os.Getenv("MANAGEMENT_PASSWORD"), os.Getenv("CPA_MANAGEMENT_KEY"), os.Getenv("MANAGEMENT_KEY")) != "" {
+		return "env"
+	}
+	return "none"
 }
 
 // normalizeRuntimeConfig fills empty management_url/key from env/defaults so pure CPA works

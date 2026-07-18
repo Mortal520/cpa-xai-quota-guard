@@ -6,7 +6,7 @@
       "name": "xAI Quota Guard",
       "description": "xAI 额度/死号管控：429/402 冷却、401/403 删除、主动巡查、Free/Super/Heavy 分类与管理 UI",
       "author": "mortal",
-      "version": "0.3.18",
+      "version": "0.3.20",
       "repository": "https://github.com/Mortal520/cpa-xai-quota-guard",
       "homepage": "https://github.com/Mortal520/cpa-xai-quota-guard",
       "license": "MIT",

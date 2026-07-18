@@ -84,6 +84,7 @@ func buildManagementRegistration() managementRegistration {
 			{Method: "GET", Path: "/cpa-xai-quota-guard/deletes", Description: "最近删除历史"},
 			{Method: "GET", Path: "/cpa-xai-quota-guard/export", Description: "导出今日用量 JSON"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/toggle", Description: "开关 enabled"},
+			{Method: "POST", Path: "/cpa-xai-quota-guard/bind-key", Description: "保存 Management Key 到进程（与浏览器同一把，纯 CPA）"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/run", Description: "手动触发恢复扫描"},
 		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol", Description: "全量巡查：仅当前启用的 xAI 凭证"},
 		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/spending", Description: "仅复核：plugin_auto 冷却号(429 free-usage 与 402 spending)"},
@@ -115,6 +116,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 	req.Path = path
 	body = decodeManagementBody(body)
 	req.Body = body
+	// Pure CPA: browser X-Management-Key is the process key for auth-files ops.
+	adoptManagementKeyFromHeaders(req.Headers)
 
 	const resourcePrefix = "/v0/resource/plugins/" + pluginID + "/"
 	if strings.HasPrefix(path, resourcePrefix) {
@@ -187,6 +190,8 @@ func dispatchAPI(req managementRequest, action string) ([]byte, error) {
 		return exportResponse()
 	case "toggle":
 		return toggleResponse(req)
+	case "bind-key":
+		return bindKeyResponse(req)
 	case "run":
 		return runResponse()
 	case "patrol":
@@ -599,6 +604,8 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			"management_source":            managementURLSource(cfg.ManagementURL),
 			"management_key_set":           resolveManagementKey(cfg.ManagementKey) != "",
 			"management_key_from_config":   strings.TrimSpace(cfg.ManagementKey) != "",
+			"management_key_source":        managementKeySource(cfg.ManagementKey),
+			"management_key_from_browser":  getRuntimeManagementKey() != "" && strings.TrimSpace(cfg.ManagementKey) == "",
 			"state_path":                   cfg.StatePath,
 			"cpamp_url":                    cfg.CPAMPURL,
 			"cpamp_admin_key_set":          cfg.CPAMPAdminKey != "",
@@ -763,6 +770,7 @@ func configResponse() ([]byte, error) {
 		"management_url_configured": strings.TrimSpace(cfg.ManagementURL) != "",
 		"management_source":      managementURLSource(cfg.ManagementURL),
 		"management_key_set":     resolveManagementKey(cfg.ManagementKey) != "",
+		"management_key_source":  managementKeySource(cfg.ManagementKey),
 		"pure_cpa_mode":         strings.TrimSpace(cfg.CPAMPURL) == "" || strings.TrimSpace(cfg.CPAMPAdminKey) == "",
 		"state_path":             cfg.StatePath,
 		"patrol_enabled":         cfg.PatrolEnabled,
@@ -776,6 +784,74 @@ func configResponse() ([]byte, error) {
 		"patrol_initial_delay_sec":  cfg.PatrolInitialDelaySec,
 		"patrol_proxy_url":      cfg.PatrolProxyURL,
 		"patrol_proxy_set":      cfg.PatrolProxyURL != "",
+	})
+}
+
+
+func bindKeyResponse(req managementRequest) ([]byte, error) {
+	if req.Method != http.MethodPost {
+		return okEnvelope(managementResponse{
+			StatusCode: http.StatusMethodNotAllowed,
+			Headers:    http.Header{"content-type": []string{"application/json; charset=utf-8"}},
+			Body:       []byte(`{"error":"POST required"}`),
+		})
+	}
+	var body struct {
+		Key            string `json:"key"`
+		ManagementKey  string `json:"management_key"`
+		Persist        *bool  `json:"persist"`
+	}
+	_ = json.Unmarshal(req.Body, &body)
+	key := strings.TrimSpace(firstNonEmpty(body.Key, body.ManagementKey))
+	if key == "" {
+		// also accept header-only bind
+		adoptManagementKeyFromHeaders(req.Headers)
+		key = getRuntimeManagementKey()
+	}
+	if key == "" {
+		return jsonResponse(map[string]any{"ok": false, "error": "empty management key"})
+	}
+	setRuntimeManagementKey(key)
+
+	cfg := guard().Config()
+	cfg.ManagementKey = key
+	if strings.TrimSpace(cfg.ManagementURL) == "" {
+		cfg.ManagementURL = resolveManagementBaseURL("")
+	}
+	persist := true
+	if body.Persist != nil {
+		persist = *body.Persist
+	}
+	persisted := false
+	if persist {
+		// Write into CPA plugin yaml so restarts keep pure-CPA working.
+		if err := writePluginConfig(cfg, map[string]any{
+			"management_key": key,
+			"management_url": resolveManagementBaseURL(cfg.ManagementURL),
+		}); err != nil {
+			// Still keep runtime key even if persist fails (e.g. self-call race).
+			guard().ApplyConfig(cfg)
+			return jsonResponse(map[string]any{
+				"ok":          true,
+				"bound":       true,
+				"persisted":   false,
+				"error":       err.Error(),
+				"key_set":     true,
+				"key_source":  managementKeySource(cfg.ManagementKey),
+				"management_url": resolveManagementBaseURL(cfg.ManagementURL),
+			})
+		}
+		persisted = true
+	}
+	guard().ApplyConfig(cfg)
+	return jsonResponse(map[string]any{
+		"ok":             true,
+		"bound":          true,
+		"persisted":      persisted,
+		"key_set":        true,
+		"key_source":     managementKeySource(cfg.ManagementKey),
+		"management_url": resolveManagementBaseURL(cfg.ManagementURL),
+		"note":           "browser key == process key (pure CPA)",
 	})
 }
 
