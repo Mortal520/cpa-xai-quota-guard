@@ -70,6 +70,7 @@ plugins:
 
 - **仅 xAI**：其它 provider 一律忽略
 - **429 free-usage-exhausted**（rolling 24h）→ `plugin_auto` 临时禁用；**恢复锚点=首次禁用+24h**，复检 soft 不后推时钟（0.3.25）；到期 Tick 自动启用并离开冷却列表；巡查 200 可提前恢复
+- **429 platform capacity** (resource-exhausted / at capacity / high demand) -> no cooldown/delete (0.3.25+, passive skip_capacity)
 - **402 spending-limit** → 冷却、不删除；巡查探测恢复后可启用
 - **401 / 真 403 权限** → 删除凭证
 - **区域/模型不可用、426、404/5xx、网络** → 不删（日志/分桶）
