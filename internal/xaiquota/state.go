@@ -39,6 +39,10 @@ type AccountRecord struct {
 	LastCooldownReason      string `json:"last_cooldown_reason,omitempty"`
 	LastCooldownDisabledAtMS int64  `json:"last_cooldown_disabled_at_ms,omitempty"`
 	LastCooldownRecoverAtMS  int64  `json:"last_cooldown_recover_at_ms,omitempty"`
+	// SpendingSuspect*: 402 short-blip confirmation before plugin_auto cooldown.
+	SpendingSuspectHits   int   `json:"spending_suspect_hits,omitempty"`
+	SpendingSuspectFirstMS int64 `json:"spending_suspect_first_ms,omitempty"`
+	SpendingSuspectLastMS  int64 `json:"spending_suspect_last_ms,omitempty"`
 	LastProbeModel string `json:"last_probe_model,omitempty"`
 	LastEventHash string `json:"last_event_hash,omitempty"`
 	UpdatedAtMS   int64  `json:"updated_at_ms,omitempty"`

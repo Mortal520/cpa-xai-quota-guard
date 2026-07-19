@@ -246,26 +246,42 @@ func TestGuardDeletesInvalidCredentials401(t *testing.T) {
 func TestGuardCooldownsSpendingLimit402(t *testing.T) {
 	auth := newMemAuth(AuthFile{AuthIndex: "x402", Name: "xai-402.json", Provider: "xai", Disabled: false})
 	g, err := NewGuard(Config{
-		Enabled:       true,
-		ManagementURL: "http://127.0.0.1:8317",
-		ManagementKey: "test",
+		Enabled:              true,
+		ManagementURL:        "http://127.0.0.1:8317",
+		ManagementKey:        "test",
+		SpendingConfirmHits:  3,
+		SpendingConfirmWindowSec: 900,
 	}, auth, &memLog{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.HandleUsage(UsageEvent{
+	ev := UsageEvent{
 		AuthIndex:  "x402",
 		Provider:   "xai",
 		Failed:     true,
 		StatusCode: 402,
 		Body:       `{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription."}`,
-	})
+	}
+	// First two hits: confirm only, not yet disabled.
+	for i := 0; i < 2; i++ {
+		g.HandleUsage(ev)
+		files, _ := auth.List()
+		if files[0].Disabled {
+			t.Fatalf("hit %d: should not disable yet", i+1)
+		}
+		rec := g.storeGet("x402")
+		if rec == nil || rec.SpendingSuspectHits != i+1 {
+			t.Fatalf("hit %d suspect hits=%v", i+1, rec)
+		}
+	}
+	// Third hit: design path — soft cooldown.
+	g.HandleUsage(ev)
 	files, _ := auth.List()
 	if len(files) != 1 {
 		t.Fatalf("expected keep file (cooldown), got %#v", files)
 	}
 	if !files[0].Disabled {
-		t.Fatal("expected plugin_auto disabled for 402 spending-limit")
+		t.Fatal("expected plugin_auto disabled for 402 spending-limit after confirm")
 	}
 	rec := g.storeGet("x402")
 	if rec == nil || rec.State != StateAutoDisabled || rec.DisableSource != SourcePluginAuto {
@@ -273,5 +289,37 @@ func TestGuardCooldownsSpendingLimit402(t *testing.T) {
 	}
 	if rec.Signal != "spending_limit" {
 		t.Fatalf("signal=%q want spending_limit", rec.Signal)
+	}
+	if rec.SpendingSuspectHits != 0 {
+		t.Fatalf("suspect should clear after cooldown, hits=%d", rec.SpendingSuspectHits)
+	}
+}
+
+func TestGuardSpending402ClearedBySuccess(t *testing.T) {
+	auth := newMemAuth(AuthFile{AuthIndex: "x402b", Name: "xai-402b.json", Provider: "xai", Disabled: false})
+	g, err := NewGuard(Config{
+		Enabled: true, ManagementURL: "http://127.0.0.1:8317", ManagementKey: "test",
+		SpendingConfirmHits: 3, SpendingConfirmWindowSec: 900,
+	}, auth, &memLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := UsageEvent{AuthIndex: "x402b", Provider: "xai", Failed: true, StatusCode: 402,
+		Body: `{"code":"personal-team-blocked:spending-limit","error":"run out of credits"}`}
+	g.HandleUsage(ev)
+	g.HandleUsage(UsageEvent{AuthIndex: "x402b", Provider: "xai", Failed: false, StatusCode: 200})
+	rec := g.storeGet("x402b")
+	if rec != nil && rec.SpendingSuspectHits != 0 {
+		t.Fatalf("success should clear suspect, got %#v", rec)
+	}
+	// new 402 after success starts at 1
+	g.HandleUsage(ev)
+	rec = g.storeGet("x402b")
+	if rec == nil || rec.SpendingSuspectHits != 1 {
+		t.Fatalf("want hits=1 after clear, got %#v", rec)
+	}
+	files, _ := auth.List()
+	if files[0].Disabled {
+		t.Fatal("must not disable on first post-success 402")
 	}
 }

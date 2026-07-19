@@ -45,6 +45,12 @@ type Config struct {
 	// PatrolInitialDelaySec: delay first scheduled patrol after start (0=immediate on first tick).
 	PatrolInitialDelaySec float64
 
+	// SpendingConfirmHits: consecutive 402 spending-limit hits required before plugin_auto cooldown.
+	// 1 = immediate (old behavior). Default 3 filters short-lived upstream blips.
+	SpendingConfirmHits int
+	// SpendingConfirmWindowSec: hits outside this window reset the counter (0=use 900s).
+	SpendingConfirmWindowSec float64
+
 }
 
 // Defaults returns safe defaults. enabled=false until configured.
@@ -66,6 +72,8 @@ func Defaults() Config {
 			PatrolModel:            DefaultPatrolModel,
 			PatrolAutoModelSwitch:  false,
 			PatrolInitialDelaySec:  60,
+		SpendingConfirmHits:       3,
+		SpendingConfirmWindowSec:  900,
 	}
 }
 
@@ -161,6 +169,12 @@ func (g *Guard) ApplyConfig(cfg Config) {
 		cfg.PatrolModel = DefaultPatrolModel
 	} else {
 		cfg.PatrolModel = strings.TrimSpace(cfg.PatrolModel)
+	}
+	if cfg.SpendingConfirmHits <= 0 {
+		cfg.SpendingConfirmHits = 3
+	}
+	if cfg.SpendingConfirmWindowSec <= 0 {
+		cfg.SpendingConfirmWindowSec = 900
 	}
 	// Reload store if path changed.
 	if g.store == nil || g.store.Path() != cfg.StatePath {
@@ -283,6 +297,8 @@ func (g *Guard) HandleUsage(ev UsageEvent) {
 	g.recordUsageMetrics(ev)
 
 	if !ev.Failed {
+		// Successful traffic clears pending 402 confirm counter.
+		_ = g.clearSpendingSuspect(trim(ev.AuthIndex))
 		return
 	}
 	authIndex := trim(ev.AuthIndex)
@@ -316,6 +332,7 @@ func (g *Guard) HandleUsage(ev UsageEvent) {
 	}
 	// Prefer explicit spending-limit path (distinct from 429 free-usage).
 	match, ok := MatchSpendingLimitQuota(baseIn)
+	spendingHit := ok
 	if !ok {
 		match, ok = MatchShortWindowQuota(baseIn)
 	}
@@ -339,6 +356,37 @@ func (g *Guard) HandleUsage(ev UsageEvent) {
 		minAt := time.Now().Add(time.Duration(cfg.MinResetSeconds) * time.Second)
 		if match.RecoverAt.Before(minAt) {
 			match.RecoverAt = minAt
+		}
+	}
+
+	// 402 spending-limit may be a short-lived upstream blip: confirm N hits in window first.
+	// Already plugin_auto spending cooldowns still go through disableForMatch (soft re-hit, no clock restart).
+	if spendingHit {
+		existing := g.storeGet(authIndex)
+		alreadyCool := existing != nil && existing.State == StateAutoDisabled &&
+			existing.DisableSource == SourcePluginAuto && existing.Owner == Owner && !existing.PreDisabled &&
+			existing.Signal == "spending_limit"
+		if !alreadyCool {
+			need := cfg.SpendingConfirmHits
+			if need <= 0 {
+				need = 3
+			}
+			windowSec := cfg.SpendingConfirmWindowSec
+			if windowSec <= 0 {
+				windowSec = 900
+			}
+			hits, firstMS, lastMS := g.noteSpendingSuspect(authIndex, ev, now, windowSec)
+			if hits < need {
+				g.logf("info", "xAI 402 spending 待核实 auth=%s hits=%d/%d window=%.0fs first=%d last=%d",
+					authIndex, hits, need, windowSec, firstMS, lastMS)
+				g.appendAction("spending_confirm", "passive", authIndex, "", ev.Account, ev.StatusCode, "spending_limit",
+					fmt.Sprintf("核实中 %d/%d（短时波动不立即冷却）", hits, need))
+				return
+			}
+			g.logf("info", "xAI 402 spending 核实通过 auth=%s hits=%d/%d → 按设计软冷却", authIndex, hits, need)
+			g.appendAction("spending_confirm_ok", "passive", authIndex, "", ev.Account, ev.StatusCode, "spending_limit",
+				fmt.Sprintf("核实通过 %d/%d", hits, need))
+			_ = g.clearSpendingSuspect(authIndex)
 		}
 	}
 
@@ -439,6 +487,9 @@ func (g *Guard) disableForMatch(authIndex string, ev UsageEvent, match MatchResu
 		Account:       firstNonEmpty(ev.Account, current.Account),
 		DisableSource: SourcePluginAuto,
 		State:         StateAutoDisabled,
+		SpendingSuspectHits: 0,
+		SpendingSuspectFirstMS: 0,
+		SpendingSuspectLastMS: 0,
 		RecoverAtMS:   match.RecoverAt.UnixMilli(),
 		DisabledAtMS:  nowMS,
 		PreDisabled:   false,
@@ -701,6 +752,69 @@ func (g *Guard) findAuth(authIndex string) (*AuthFile, error) {
 		}
 	}
 	return nil, nil
+}
+
+
+// noteSpendingSuspect records a 402 spending-limit observation. Returns hits in current window.
+func (g *Guard) noteSpendingSuspect(authIndex string, ev UsageEvent, now time.Time, windowSec float64) (hits int, firstMS, lastMS int64) {
+	if authIndex == "" {
+		return 0, 0, 0
+	}
+	nowMS := now.UnixMilli()
+	windowMS := int64(windowSec * 1000)
+	rec := g.storeGet(authIndex)
+	if rec == nil {
+		rec = &AccountRecord{
+			AuthIndex:     authIndex,
+			Provider:      "xai",
+			Account:       ev.Account,
+			DisableSource: SourceNone,
+			State:         StateActive,
+		}
+	}
+	// Reset window if first hit too old or gap too large.
+	if rec.SpendingSuspectFirstMS > 0 && windowMS > 0 && nowMS-rec.SpendingSuspectFirstMS > windowMS {
+		rec.SpendingSuspectHits = 0
+		rec.SpendingSuspectFirstMS = 0
+		rec.SpendingSuspectLastMS = 0
+	}
+	if rec.SpendingSuspectHits <= 0 || rec.SpendingSuspectFirstMS == 0 {
+		rec.SpendingSuspectFirstMS = nowMS
+		rec.SpendingSuspectHits = 1
+	} else {
+		rec.SpendingSuspectHits++
+	}
+	rec.SpendingSuspectLastMS = nowMS
+	if rec.Account == "" {
+		rec.Account = ev.Account
+	}
+	if rec.Provider == "" {
+		rec.Provider = "xai"
+	}
+	// Keep non-disabled identity while confirming.
+	if rec.State == "" {
+		rec.State = StateActive
+	}
+	_ = g.storeUpsert(*rec)
+	return rec.SpendingSuspectHits, rec.SpendingSuspectFirstMS, rec.SpendingSuspectLastMS
+}
+
+func (g *Guard) clearSpendingSuspect(authIndex string) error {
+	authIndex = trim(authIndex)
+	if authIndex == "" {
+		return nil
+	}
+	rec := g.storeGet(authIndex)
+	if rec == nil {
+		return nil
+	}
+	if rec.SpendingSuspectHits == 0 && rec.SpendingSuspectFirstMS == 0 && rec.SpendingSuspectLastMS == 0 {
+		return nil
+	}
+	rec.SpendingSuspectHits = 0
+	rec.SpendingSuspectFirstMS = 0
+	rec.SpendingSuspectLastMS = 0
+	return g.storeUpsert(*rec)
 }
 
 func (g *Guard) storeGet(authIndex string) *AccountRecord {

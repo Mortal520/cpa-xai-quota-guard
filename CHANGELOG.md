@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.24
+
+### 402 spending：多次核实后再冷却
+- 被动路径对 `personal-team-blocked:spending-limit` 不再单次即冷却
+- 默认 **连续 3 次**（窗口 900s）核实后才按设计 `plugin_auto` 软冷却
+- 中间成功请求会清零核实计数（短时波动恢复则不进冷却）
+- 配置：`spending_confirm_hits`（默认 3，设 1=旧行为）、`spending_confirm_window_sec`（默认 900）
+- 日志/被动动作：`spending_confirm` / `spending_confirm_ok`
+
+
 ## 0.3.23
 
 ### 修复 plugin_auto 停用标识丢失

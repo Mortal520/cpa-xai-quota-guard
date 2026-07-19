@@ -1957,6 +1957,8 @@ var PASSIVE_ACT_FP = "";
 function passiveActionLabel(a){
   switch(String(a||"")){
     case "cooldown": return "冷却";
+    case "spending_confirm": return "402核实中";
+    case "spending_confirm_ok": return "402核实通过";
     case "cooldown_extend": return "延长冷却";
     case "delete": case "deleted": return "删除";
     case "recover": return "恢复";

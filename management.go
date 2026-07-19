@@ -477,6 +477,9 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			item["last_cooldown_reason"] = htmlUnescapeBasic(rec.LastCooldownReason)
 			item["last_cooldown_disabled_at_ms"] = rec.LastCooldownDisabledAtMS
 			item["last_cooldown_recover_at_ms"] = rec.LastCooldownRecoverAtMS
+			item["spending_suspect_hits"] = rec.SpendingSuspectHits
+			item["spending_suspect_first_ms"] = rec.SpendingSuspectFirstMS
+			item["spending_suspect_last_ms"] = rec.SpendingSuspectLastMS
 			if rec.State == xaiquota.StateAutoDisabled {
 				autoN++
 				if effRecover > 0 && now >= effRecover {
@@ -641,6 +644,8 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			"patrol_initial_delay_sec":  cfg.PatrolInitialDelaySec,
 			"patrol_proxy_url":           cfg.PatrolProxyURL,
 			"patrol_proxy_set":           cfg.PatrolProxyURL != "",
+			"spending_confirm_hits":        cfg.SpendingConfirmHits,
+			"spending_confirm_window_sec":  cfg.SpendingConfirmWindowSec,
 		},
 		"accounts": outList,
 		"summary": map[string]any{
