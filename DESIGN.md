@@ -301,3 +301,7 @@ dead credential (401 / 真 403 permission-denied)
 - `resource-exhausted` / at capacity / high demand：**不冷却、不删号**（平台负载，非账号额度）
 - 仅 `subscription:free-usage-exhausted` 等明确免费额度信号进入 soft 冷却
 
+## 日额度池（0.3.27+）
+- 单号上限：InferFreeLimitPerAccount 从 free-usage 快照 limit 取众数，默认回退 1M
+- 日池=已知启用 limit 合计 + 未观测启用 × 推断单号上限
+- 滚动 used：仅启用号，actual 封顶 limit

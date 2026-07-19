@@ -269,3 +269,4 @@ curl -sS -H "X-Management-Key: $KEY" \
 - 安装详解：https://github.com/Mortal520/cpa-xai-quota-guard/blob/main/docs/INSTALL.md  
 - Releases：https://github.com/Mortal520/cpa-xai-quota-guard/releases/tag/v0.3.13  
 - 仓库：https://github.com/Mortal520/cpa-xai-quota-guard  
+

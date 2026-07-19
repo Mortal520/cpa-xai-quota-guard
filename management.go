@@ -22,7 +22,13 @@ func renderConsole() []byte {
 	if err != nil {
 		return []byte("<html><body>console missing</body></html>")
 	}
-	return b
+	// Bust intermediate caches: stamp running plugin version into HTML.
+	s := string(b)
+	s = strings.ReplaceAll(s, "__PLUGIN_VER__", pluginVer)
+	if !strings.Contains(s, pluginVer) {
+		s = strings.Replace(s, "</title>", "</title>\n<meta name=\"cpa-xai-qg-version\" content=\""+pluginVer+"\">", 1)
+	}
+	return []byte(s)
 }
 
 // managementRequest mirrors the request the host delivers to management.handle.
@@ -163,8 +169,12 @@ func serveResource(sub string) ([]byte, error) {
 	}
 	return okEnvelope(managementResponse{
 		StatusCode: http.StatusOK,
-		Headers:    http.Header{"content-type": []string{"text/html; charset=utf-8"}},
-		Body:       renderConsole(),
+		Headers: http.Header{
+			"content-type":  []string{"text/html; charset=utf-8"},
+			"cache-control": []string{"no-store, no-cache, must-revalidate"},
+			"pragma":        []string{"no-cache"},
+		},
+		Body: renderConsole(),
 	})
 }
 
