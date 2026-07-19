@@ -355,18 +355,19 @@ func (s *Store) ObserveFreeQuota(authIndex string, actual, limit int64, at time.
 }
 
 // BuildMetricsView combines auth-file inventory + durable usage/quota snapshots.
-// liveAuth: if non-nil, only quota snapshots whose auth_index is still present are counted
-// (deleted credentials must not inflate rolling pool).
+// liveAuth: if non-nil, only snapshots for still-present credentials are counted.
+// Prefer BuildMetricsViewOpts with enabledAuth for correct rolling pool.
 func BuildMetricsView(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats) MetricsView {
-	return BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled, st, false, nil)
+	return BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled, st, false, nil, nil)
 }
 
 // BuildMetricsViewOpts:
 //   - Daily total quota (QuotaTotalEst) = enabled xAI * DefaultFreeLimit (2M rolling 24h each).
-//     Disabled credentials are NOT capacity; includeUnobservedEst=false → known live limits only.
+//     Disabled credentials are NOT capacity; includeUnobservedEst=false → known enabled limits only.
 //   - Used today/total = usage.handle real tokens only (no free-usage actual floor, no success×N).
-//   - Rolling used/limit = free-usage snapshots for still-live auth only.
-func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, includeUnobservedEst bool, liveAuth map[string]bool) MetricsView {
+//   - Rolling used/limit = free-usage snapshots for **enabled** accounts only (not disabled/deleted).
+//   - actual is capped at limit when summing (Grok free-usage often reports actual>limit).
+func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, includeUnobservedEst bool, liveAuth, enabledAuth map[string]bool) MetricsView {
 	st = *EnsureUsageStats(&st)
 	var usedKnown, limitKnown int64
 	known := 0
@@ -374,38 +375,44 @@ func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, 
 		if q == nil || q.Limit <= 0 {
 			continue
 		}
-		if liveAuth != nil {
+		// Prefer enabled set for rolling pool; fall back to live presence; else all snapshots.
+		if enabledAuth != nil {
+			if !enabledAuth[k] {
+				continue
+			}
+		} else if liveAuth != nil {
 			if _, ok := liveAuth[k]; !ok {
-				continue // stale / deleted credential snapshot
+				continue
 			}
 		}
 		known++
-		usedKnown += q.Actual
+		// Cap actual at limit: exhausted bodies often show actual slightly over limit.
+		act := q.Actual
+		if act < 0 {
+			act = 0
+		}
+		if act > q.Limit {
+			act = q.Limit
+		}
+		usedKnown += act
 		limitKnown += q.Limit
 	}
 	def := DefaultFreeLimit
 	// Daily free-tier capacity: each ENABLED account ≈ 2M / rolling 24h.
-	// Disabled accounts contribute 0 usable capacity.
 	dailyCapEnabled := int64(xaiEnabled) * def
-	// Unobserved among enabled (not total inventory): how many enabled lack a snapshot.
-	// Approximate: if we only have live set, known may include disabled-with-snapshot;
-	// when liveAuth given, known is live-only. Enabled without snapshot ≈ max(0, enabled-known).
 	unobservedEnabled := xaiEnabled - known
 	if unobservedEnabled < 0 {
 		unobservedEnabled = 0
 	}
 	var totalEst int64
 	if includeUnobservedEst {
-		// Primary product view: daily pool = all currently-enabled free slots.
 		totalEst = dailyCapEnabled
 	} else {
-		// Strict: only sum observed limits on live accounts (no fill).
 		totalEst = limitKnown
 	}
 	if xaiEnabled == 0 {
 		totalEst = 0
 	}
-	// Never count disabled inventory as daily capacity.
 	if totalEst > dailyCapEnabled && dailyCapEnabled > 0 {
 		totalEst = dailyCapEnabled
 	}
@@ -420,7 +427,7 @@ func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, 
 		alertMsg = "连续成功请求缺少 usage Detail token，可能 CPA 未发布用量明细；日历今日累计可能偏低。"
 	}
 
-	note := "仅xAI；日额度池=启用凭证×2M(rolling 24h)；已用=usage 真实token；滚动池=存活凭证 free-usage 快照；禁用不计入额度与已用。"
+	note := "仅xAI；日额度池=启用×2M(rolling 24h)；日历今日/累计=usage.handle 真实token(非快照)；滚动池=启用号 free-usage 快照(actual封顶limit)；禁用不计入。"
 	return MetricsView{
 		XAITotal:              xaiTotal,
 		XAIEnabled:            xaiEnabled,
@@ -438,7 +445,7 @@ func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, 
 		UsedTotalDisplay:      usedTotalDisplay,
 		RequestsToday:         st.RequestsToday,
 		RequestsTotal:         st.RequestsTotal,
-		EstimatedToday:        0, // never surface success×N estimates in dashboard
+		EstimatedToday:        0,
 		DefaultLimitPerAcct:   def,
 		EstimatePerSuccess:    0,
 		DayKey:                st.DayKey,
@@ -454,6 +461,23 @@ func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, 
 		BackfillTokensFloor:   st.BackfillTokensFloor,
 		Note:                  note,
 	}
+}
+
+// PruneQuotaSnapshots removes free-usage snapshots for auth indexes no longer in liveAuth.
+// Shrinks state after mass deletes; does not touch calendar UsedToday/UsedTotal.
+func (s *Store) PruneQuotaSnapshots(liveAuth map[string]bool) (removed int, err error) {
+	if liveAuth == nil {
+		return 0, nil
+	}
+	err = s.mutateUsage(func(st *UsageStats) {
+		for k := range st.QuotaByAuth {
+			if _, ok := liveAuth[k]; !ok {
+				delete(st.QuotaByAuth, k)
+				removed++
+			}
+		}
+	})
+	return removed, err
 }
 
 // ApplyCalendarBackfill raises calendar-day used_today floor from an external source (e.g. CPAMP).

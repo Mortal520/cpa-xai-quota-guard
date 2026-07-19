@@ -600,10 +600,21 @@ func stateResponse(req managementRequest) ([]byte, error) {
 
 	g.SyncInventoryUsage(successSum, failedSum, 0)
 	liveAuth := map[string]bool{}
-	for k := range byIndex {
+	enabledAuth := map[string]bool{}
+	for k, f := range byIndex {
 		liveAuth[k] = true
+		if !f.Disabled {
+			enabledAuth[k] = true
+		}
 	}
-	metrics := g.MetricsWithInventoryLive(xaiTotal, xaiEnabled, xaiDisabled, liveAuth)
+	// Drop free-usage snapshots for deleted credentials so rolling sums stay honest.
+	if invOK && len(liveAuth) > 0 {
+		if n, err := g.PruneQuotaSnapshots(liveAuth); err == nil && n > 0 {
+			// quiet: metrics recompute below
+			_ = n
+		}
+	}
+	metrics := g.MetricsWithInventoryLive(xaiTotal, xaiEnabled, xaiDisabled, liveAuth, enabledAuth)
 	metrics.EstimatePerSuccess = 0
 
 	return jsonResponse(map[string]any{
@@ -707,7 +718,7 @@ func exportResponse() ([]byte, error) {
 	g := guard()
 	cfg := g.Config()
 	xaiTotal, xaiEnabled, xaiDisabled, _, _ := countXAIInventory()
-	metrics := g.MetricsWithInventoryLive(xaiTotal, xaiEnabled, xaiDisabled, nil)
+	metrics := g.MetricsWithInventoryLive(xaiTotal, xaiEnabled, xaiDisabled, nil, nil)
 	return jsonResponse(map[string]any{
 		"exported_at_ms": time.Now().UnixMilli(),
 		"plugin":         pluginID,

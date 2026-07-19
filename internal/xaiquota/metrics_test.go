@@ -56,7 +56,7 @@ func TestBuildMetricsViewLiveFilterAndDailyPool(t *testing.T) {
 		DefaultLimitPerAcct: DefaultFreeLimit,
 	}
 	live := map[string]bool{"a1": true}
-	v := BuildMetricsViewOpts(10, 5, 5, st, true, live)
+	v := BuildMetricsViewOpts(10, 5, 5, st, true, live, live)
 	if v.QuotaTotalEst != 5*DefaultFreeLimit {
 		t.Fatalf("daily pool est=%d want %d (enabled*2M)", v.QuotaTotalEst, 5*DefaultFreeLimit)
 	}
@@ -72,7 +72,7 @@ func TestBuildMetricsViewLiveFilterAndDailyPool(t *testing.T) {
 	if v.UsedTodayDisplay != 50 || v.UsedTotalDisplay != 80 {
 		t.Fatalf("real display today=%d total=%d", v.UsedTodayDisplay, v.UsedTotalDisplay)
 	}
-	v0 := BuildMetricsViewOpts(10, 0, 10, st, true, live)
+	v0 := BuildMetricsViewOpts(10, 0, 10, st, true, live, nil)
 	if v0.QuotaTotalEst != 0 {
 		t.Fatalf("enabled=0 pool=%d want 0", v0.QuotaTotalEst)
 	}
@@ -168,14 +168,14 @@ func TestAddUsageEventPerAuthAndZeroStreak(t *testing.T) {
 
 func TestBuildMetricsViewDailyPoolEnabledOnly(t *testing.T) {
 	st := UsageStats{DefaultLimitPerAcct: DefaultFreeLimit}
-	v := BuildMetricsViewOpts(522, 500, 22, st, true, nil)
+	v := BuildMetricsViewOpts(522, 500, 22, st, true, nil, nil)
 	if v.QuotaTotalEst != 500*DefaultFreeLimit {
 		t.Fatalf("daily pool est=%d want %d", v.QuotaTotalEst, 500*DefaultFreeLimit)
 	}
 	if v.UnobservedAccounts != 500 {
 		t.Fatalf("unobs=%d want 500 (all enabled unobserved)", v.UnobservedAccounts)
 	}
-	v2 := BuildMetricsViewOpts(22, 0, 22, st, true, nil)
+	v2 := BuildMetricsViewOpts(22, 0, 22, st, true, nil, nil)
 	if v2.QuotaTotalEst != 0 {
 		t.Fatalf("disabled-only pool=%d", v2.QuotaTotalEst)
 	}
@@ -209,3 +209,37 @@ func TestResetCalendarToday(t *testing.T) {
 		t.Fatalf("snapshot should remain: %+v", st.QuotaByAuth["a1"])
 	}
 }
+
+
+func TestBuildMetricsViewEnabledOnlyAndCapActual(t *testing.T) {
+	st := UsageStats{
+		UsedToday: 1000,
+		UsedTotal: 5000,
+		QuotaByAuth: map[string]*AccountQuotaSnapshot{
+			"en1":  {AuthIndex: "en1", Actual: 2_500_000, Limit: 2_000_000}, // over limit
+			"dis1": {AuthIndex: "dis1", Actual: 1_800_000, Limit: 2_000_000},
+			"gone": {AuthIndex: "gone", Actual: 1_000_000, Limit: 2_000_000},
+		},
+	}
+	live := map[string]bool{"en1": true, "dis1": true}
+	enabled := map[string]bool{"en1": true}
+	v := BuildMetricsViewOpts(3, 1, 2, st, true, live, enabled)
+	if v.RollingAccounts != 1 {
+		t.Fatalf("rolling accounts=%d want 1 enabled", v.RollingAccounts)
+	}
+	if v.RollingUsedKnown != 2_000_000 {
+		t.Fatalf("rolling used=%d want capped 2M", v.RollingUsedKnown)
+	}
+	if v.RollingLimitKnown != 2_000_000 {
+		t.Fatalf("rolling limit=%d want 2M", v.RollingLimitKnown)
+	}
+	if v.UsedTodayDisplay != 1000 || v.UsedTotalDisplay != 5000 {
+		t.Fatalf("calendar must stay usage-only today=%d total=%d", v.UsedTodayDisplay, v.UsedTotalDisplay)
+	}
+	// disabled snapshot alone must not enter rolling when enabledAuth provided
+	v2 := BuildMetricsViewOpts(2, 0, 2, st, true, live, map[string]bool{})
+	if v2.RollingAccounts != 0 || v2.RollingUsedKnown != 0 {
+		t.Fatalf("no enabled => rolling empty got acc=%d used=%d", v2.RollingAccounts, v2.RollingUsedKnown)
+	}
+}
+

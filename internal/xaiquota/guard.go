@@ -680,20 +680,34 @@ func (g *Guard) ResetCalendarToday(note string) error {
 }
 
 func (g *Guard) MetricsWithInventory(xaiTotal, xaiEnabled, xaiDisabled int) MetricsView {
-	return g.MetricsWithInventoryLive(xaiTotal, xaiEnabled, xaiDisabled, nil)
+	return g.MetricsWithInventoryLive(xaiTotal, xaiEnabled, xaiDisabled, nil, nil)
 }
 
-// MetricsWithInventoryLive filters rolling free-usage snapshots to liveAuth (CPA inventory).
-func (g *Guard) MetricsWithInventoryLive(xaiTotal, xaiEnabled, xaiDisabled int, liveAuth map[string]bool) MetricsView {
+// MetricsWithInventoryLive filters rolling free-usage snapshots to CPA inventory.
+// enabledAuth: only currently-enabled accounts enter the rolling used/limit pool.
+// liveAuth: presence set (enabled+disabled) for pruning stale snapshots.
+func (g *Guard) MetricsWithInventoryLive(xaiTotal, xaiEnabled, xaiDisabled int, liveAuth, enabledAuth map[string]bool) MetricsView {
 	st := UsageStats{}
 	if g.store != nil {
 		st = g.store.GetUsageStats()
 	}
 	cfg := g.Config()
-	v := BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled, st, cfg.IncludeUnobservedQuotaEst, liveAuth)
+	v := BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled, st, cfg.IncludeUnobservedQuotaEst, liveAuth, enabledAuth)
 	v.EstimatePerSuccess = 0
 	v.EstimatedToday = 0
 	return v
+}
+
+// MetricsWithInventoryLiveLegacy keeps old single-map callers (live=enabled filter).
+func (g *Guard) MetricsWithInventoryLiveLegacy(xaiTotal, xaiEnabled, xaiDisabled int, liveAuth map[string]bool) MetricsView {
+	return g.MetricsWithInventoryLive(xaiTotal, xaiEnabled, xaiDisabled, liveAuth, liveAuth)
+}
+
+func (g *Guard) PruneQuotaSnapshots(liveAuth map[string]bool) (int, error) {
+	if g.store == nil {
+		return 0, nil
+	}
+	return g.store.PruneQuotaSnapshots(liveAuth)
 }
 
 

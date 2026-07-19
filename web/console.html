@@ -304,9 +304,9 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
         <h3>额度（仅 xAI）</h3>
         <div class="stats">
           <div class="stat accent"><span class="lbl">日额度池(估)</span><b id="sQuotaTotal">0</b><div class="sub" id="sQuotaKnown">启用凭证×2M · 24h滚动</div></div>
-          <div class="stat accent"><span class="lbl">已用 · 日历今日</span><b id="sUsedToday">0</b><div class="sub" id="sDayKey">—</div></div>
-          <div class="stat accent"><span class="lbl">滚动快照 used/limit</span><b id="sRolling">0</b><div class="sub" id="sRollingSub">存活凭证 free-usage 观测</div></div>
-          <div class="stat accent"><span class="lbl">已用 · 累计(真实)</span><b id="sUsedTotal">0</b><div class="sub" id="sUsedNote">usage token 累计</div>
+          <div class="stat accent"><span class="lbl">已用 · 日历今日</span><b id="sUsedToday">0</b><div class="sub" id="sDayKey">usage 事件累计 · 非滚动快照</div></div>
+          <div class="stat accent"><span class="lbl">滚动快照 used/limit</span><b id="sRolling">0</b><div class="sub" id="sRollingSub">仅启用号 free-usage · actual≤limit</div></div>
+          <div class="stat accent"><span class="lbl">已用 · 累计(插件)</span><b id="sUsedTotal">0</b><div class="sub" id="sUsedNote">插件生命周期 usage 累计 · 非官方账单</div>
             <div class="bar" title="已用/总额度"><i id="sUsedBar"></i></div>
           </div>
         </div>
@@ -1201,7 +1201,7 @@ function paintStatusBar(d){
     const over = rl>0 && ru>rl; roll.innerHTML = fmtTokenHTML(ru) + '<span class="muted" style="font-size:.75rem"> / </span>' + fmtTokenHTML(rl) + (over?' <span class="err" style="font-size:.75rem">超限</span>':'');
   }
   const rs = document.getElementById("sRollingSub");
-  if(rs){ rs.textContent = "存活快照 " + (m.rolling_accounts||m.quota_known_accounts||0) + " · 非已用总计 · 禁用不计入"; }
+  if(rs){ rs.textContent = "启用快照 " + (m.rolling_accounts||m.quota_known_accounts||0) + " · 滚动24h观测 · 禁用不计入 · actual已封顶"; }
   let alertEl = document.getElementById("detailAlert");
   if(!alertEl){
     const tip = document.getElementById("recoverTip");
@@ -1232,13 +1232,17 @@ function paintStatusBar(d){
     let extra = "请求 " + req;
     if(est>0) extra += " · 估 " + fmtToken(est);
     if(real>0) extra += " · 实 " + fmtToken(real);
+    else extra += " · 实 0(跨日已清零/缺Detail)";
     let bf = ""; if(m.backfill_source){ bf = " · 回补 " + m.backfill_source + (m.backfill_tokens_floor?(" "+fmtToken(m.backfill_tokens_floor)):""); }
     dk.textContent = extra + " · " + (m.day_key||"—") + bf + (typeof resetNote!=="undefined"?resetNote:"");
   }
   const usedTotal = (m.used_total_display != null ? m.used_total_display : (m.used_total||0));
   setToken("sUsedTotal", usedTotal);
   const un = document.getElementById("sUsedNote");
-  if(un) un.textContent = "usage累计 " + fmtToken(m.used_total||0) + " · 快照actual " + fmtToken(m.quota_used_known||0) + "(不计入已用) · 今日请求 " + (m.requests_today||0);
+  if(un){
+    const avg = (m.requests_today>0) ? Math.round((m.used_today||0)/(m.requests_today||1)) : 0;
+    un.textContent = "插件累计 " + fmtToken(m.used_total||0) + " · 启用快照 " + fmtToken(m.rolling_used_known||m.quota_used_known||0) + "/" + fmtToken(m.rolling_limit_known||m.quota_limit_known||0) + " · 今日请求 " + (m.requests_today||0) + (avg?(" · 均 "+fmtToken(avg)):"");
+  }
   const bar = document.getElementById("sUsedBar");
   if(bar){
     const total = Number(m.quota_total_est||0);
