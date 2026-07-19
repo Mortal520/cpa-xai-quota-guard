@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.22
+
+### 状态栏「可用」修正
+- 可用 = `xai_enabled`（CPA 当前仍启用、可调度）
+- 不再用 `总数 - 程序停用 - 手动停用`（会把 CPA 已停用但未记 plugin_auto 的号算成可用，出现「启用1 / 可用62」）
+- 副标题展示 CPA停用 / 程序冷却 / 手动 拆分
+
+
 ## 0.3.21
 
 ### 修复巡查 `patrol_auth_dir not configured`

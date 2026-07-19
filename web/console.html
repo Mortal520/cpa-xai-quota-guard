@@ -296,7 +296,7 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
         <h3>运行状态</h3>
         <div class="stats">
           <div class="stat accent"><span class="lbl">xAI 凭证</span><b id="sXaiTotal">0</b><div class="sub" id="sXaiSplit">0 个账户</div></div>
-          <div class="stat accent"><span class="lbl">可用</span><b id="sXaiAvail">0</b><div class="sub" id="sAvailSub">未停用凭证</div></div>
+          <div class="stat accent"><span class="lbl">可用</span><b id="sXaiAvail">0</b><div class="sub" id="sAvailSub">CPA 当前启用（可调度）</div></div>
           <div class="stat warn"><span class="lbl">自动停用中</span><b id="sAuto">0</b><div class="sub" id="sAutoSub">plugin_auto 冷却</div></div>
         </div>
       </div>
@@ -1138,9 +1138,12 @@ function paintStatusBar(d){
   const m = d.metrics || {};
   const xaiN = (m.xai_total != null ? m.xai_total : (s.total||0));
   const xaiE = m.xai_enabled || 0;
+  const xaiD = m.xai_disabled || 0;
   const autoD = s.auto_disabled || 0;
   const manualD = s.user_manual || 0;
-  const avail = Math.max(0, xaiN - autoD - manualD);
+  // 可用 = CPA 当前仍启用的凭证数（可被调度）。
+  // 禁止 xai_total - auto - manual：CPA 因 402/巡查/手动等已停用、但未记入 plugin_auto 时会把整池算成「可用」。
+  const avail = Math.max(0, xaiE);
 
   set("sXaiTotal", xaiN);
   const split = document.getElementById("sXaiSplit");
@@ -1150,15 +1153,16 @@ function paintStatusBar(d){
     if(s.tier_super) tierBits.push("S"+s.tier_super);
     if(s.tier_heavy) tierBits.push("H"+s.tier_heavy);
     if(s.tier_unknown) tierBits.push("?"+s.tier_unknown);
-    split.textContent = "CPA启用 "+xaiE+" · 停用 "+(m.xai_disabled||0)
+    split.textContent = "CPA启用 "+xaiE+" · 停用 "+xaiD
       + (tierBits.length?(" · "+tierBits.join("/")):"");
   }
   set("sXaiAvail", avail);
   var availSub = document.getElementById("sAvailSub");
   if(availSub){
-    var parts = ["总数 "+xaiN];
-    if(autoD > 0) parts.push("- 程序停用 "+autoD);
-    if(manualD > 0) parts.push("- 手动停用 "+manualD);
+    var parts = ["CPA 可调度 "+xaiE];
+    if(xaiD > 0) parts.push("CPA停用 "+xaiD);
+    if(autoD > 0) parts.push("其中程序冷却 "+autoD);
+    if(manualD > 0) parts.push("手动 "+manualD);
     availSub.textContent = parts.join(" · ");
   }
   set("sAuto", autoD);
