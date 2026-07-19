@@ -49,6 +49,10 @@ func MatchShortWindowQuota(in MatchInput) (MatchResult, bool) {
 	if in.StatusCode != http.StatusTooManyRequests {
 		return MatchResult{}, false
 	}
+	// Platform/model capacity (high demand) is not per-account free-usage quota.
+	if IsPlatformCapacityExhausted(in.StatusCode, in.Body) {
+		return MatchResult{}, false
+	}
 
 	now := in.Now
 	if now.IsZero() {
@@ -382,6 +386,47 @@ func IsPermissionDenied(statusCode int, body string) bool {
 	}
 	return false
 }
+// IsPlatformCapacityExhausted detects xAI/Grok "model at capacity / high demand"
+// 429s. These are shared platform load signals, not account free-usage exhaustion.
+// Callers must skip cooldown/delete (and patrol must not treat as free-usage).
+func IsPlatformCapacityExhausted(statusCode int, body string) bool {
+	// Capacity is almost always 429; allow 503. Unknown/0 status still inspect body.
+	if statusCode != 0 && statusCode != http.StatusTooManyRequests && statusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(body))
+	if lower == "" {
+		return false
+	}
+	// Never treat true free-usage exhaustion as platform capacity.
+	if strings.Contains(lower, "subscription:free-usage-exhausted") ||
+		strings.Contains(lower, "free-usage-exhausted") ||
+		strings.Contains(lower, "included free usage") ||
+		strings.Contains(lower, "tokens (actual/limit)") {
+		return false
+	}
+	code := normalizeKey(extractErrorCode(body))
+	capacityMsg := strings.Contains(lower, "at capacity") ||
+		strings.Contains(lower, "high demand") ||
+		strings.Contains(lower, "currently at capacity") ||
+		strings.Contains(lower, "model is currently at capacity") ||
+		strings.Contains(lower, "due to high demand") ||
+		strings.Contains(lower, "temporarily at capacity") ||
+		strings.Contains(lower, "server is busy") ||
+		strings.Contains(lower, "overloaded")
+	if capacityMsg {
+		return true
+	}
+	// resource-exhausted alone is often capacity/load; free-usage uses subscription:free-usage-*
+	if code == "resource_exhausted" || code == "resourceexhausted" {
+		return true
+	}
+	if strings.Contains(lower, "resource-exhausted") || strings.Contains(lower, "resource_exhausted") {
+		return true
+	}
+	return false
+}
+
 func isExcludedFailure(body string) bool {
 	lower := strings.ToLower(body)
 	excludes := []string{
@@ -408,6 +453,14 @@ func isExcludedFailure(body string) bool {
 		"monthly quota",
 		"quota exceeded for the month",
 		"spend limit",
+		// platform load (also covered by IsPlatformCapacityExhausted)
+		"resource-exhausted",
+		"resource_exhausted",
+		"at capacity",
+		"high demand",
+		"due to high demand",
+		"currently at capacity",
+		"model is currently at capacity",
 	}
 	for _, key := range excludes {
 		if strings.Contains(lower, key) {

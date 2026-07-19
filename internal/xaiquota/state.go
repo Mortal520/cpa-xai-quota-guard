@@ -59,7 +59,7 @@ type DeleteEvent struct {
 }
 
 // ActionEvent is a durable passive/active account handling log entry.
-// Action: cooldown | cooldown_extend | delete | recover | skip_manual | skip_region | skip_parse | reenable
+// Action: cooldown | cooldown_extend | delete | recover | skip_manual | skip_region | skip_parse | skip_capacity | reenable
 // Source: passive | tick | patrol
 type ActionEvent struct {
 	TimeMS    int64  `json:"time_ms"`

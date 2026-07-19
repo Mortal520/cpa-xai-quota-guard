@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.25
+
+### 平台高负载 429 不冷却
+- 识别 `code=resource-exhausted` 与文案 `at capacity` / `high demand` / overloaded 等
+- **被动** `HandleUsage`：记 `skip_capacity`，不禁用、不删号
+- **巡查** 429：记 error/skip，不走 free-usage 冷却
+- 与真实 `subscription:free-usage-exhausted` 严格区分，后者仍 soft 冷却
+- `MatchShortWindowQuota` 入口显式排除 capacity（即使带 Retry-After 也不匹配）
+
 ## 0.3.24
 
 ### 402 spending：多次核实后再冷却

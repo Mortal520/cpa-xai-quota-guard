@@ -296,3 +296,8 @@ dead credential (401 / 真 403 permission-denied)
 合成 HTTP 码：`-1` 超时、`-2` 取消、`-3` DNS、`-4` TLS、`-5` 连接、`0` 其它网络。  
 动作：`net_*` / `probe_http_*` / `region_block` / `cli_version` / `cooldown` / `deleted` / `alive` / `reenabled`。  
 未知 action **计 error，不计 alive**。网络失败同模型最多 3 次重试（不换模型）。
+
+## 平台高负载（0.3.25+）
+- `resource-exhausted` / at capacity / high demand：**不冷却、不删号**（平台负载，非账号额度）
+- 仅 `subscription:free-usage-exhausted` 等明确免费额度信号进入 soft 冷却
+

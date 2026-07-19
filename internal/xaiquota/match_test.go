@@ -288,3 +288,54 @@ func TestRegionPermissionDeniedNotDead(t *testing.T) {
 		t.Fatal("endpoint permission-denied must remain dead")
 	}
 }
+
+
+func TestPlatformCapacityNotShortWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	body := `{"code":"resource-exhausted","error":"The model is currently at capacity due to high demand. Please try again later."}`
+	// Even with Retry-After, capacity must never cool down accounts.
+	h := http.Header{}
+	h.Set("Retry-After", "30")
+	if !IsPlatformCapacityExhausted(429, body) {
+		t.Fatal("expected capacity match")
+	}
+	_, ok := MatchShortWindowQuota(MatchInput{
+		Provider: "xai", Failed: true, StatusCode: 429, Body: body, ResponseHeaders: h, Now: now, MaxResetSeconds: 86400,
+	})
+	if ok {
+		t.Fatal("platform capacity must not MatchShortWindowQuota")
+	}
+	// free-usage still matches
+	bodyFree := `{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for model grok for now. Usage resets over a rolling 24-hour window — tokens (actual/limit): 100/1000000."}`
+	if IsPlatformCapacityExhausted(429, bodyFree) {
+		t.Fatal("free-usage must not be classified as capacity")
+	}
+	got, ok := MatchShortWindowQuota(MatchInput{
+		Provider: "xai", Failed: true, StatusCode: 429, Body: bodyFree, Now: now, MaxResetSeconds: 86400,
+	})
+	if !ok {
+		t.Fatal("free-usage must still match short-window")
+	}
+	if got.RecoverAt.IsZero() {
+		t.Fatal("free-usage recover_at required")
+	}
+}
+
+func TestIsPlatformCapacityExhaustedVariants(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`{"code":"resource-exhausted","error":"high demand"}`, true},
+		{`{"error":"The model is currently at capacity"}`, true},
+		{`{"code":"subscription:free-usage-exhausted","error":"free usage"}`, false},
+		{`{"code":"rate_limit_exceeded","error":"Rate limit reached"}`, false},
+		{``, false},
+	}
+	for _, c := range cases {
+		if got := IsPlatformCapacityExhausted(429, c.body); got != c.want {
+			t.Fatalf("body=%q got=%v want=%v", c.body, got, c.want)
+		}
+	}
+}
+

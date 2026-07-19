@@ -1423,6 +1423,13 @@ func (g *Guard) probeOneCredential(f AuthFile, authDir string, client *http.Clie
 	}
 	if code == http.StatusTooManyRequests {
 		// 429 never deletes.
+		// Platform capacity / high demand: not per-account quota — skip cooldown.
+		if IsPlatformCapacityExhausted(code, bodyStr) {
+			return probeResult{
+				authIndex: f.AuthIndex, fileName: f.Name, account: f.Account,
+				action: "error", reason: fmt.Sprintf("429 平台高负载(不冷却) model=%s · %s", model, truncate(bodyStr, 120)), httpCode: code, modelUsed: model,
+			}
+		}
 		// spending_limit cooldown + 429 => credential still valid for free path => re-enable
 		// free-usage short window on enabled account => plugin_auto cooldown (same as HandleUsage)
 		if live != nil && live.State == StateAutoDisabled && live.DisableSource == SourcePluginAuto &&

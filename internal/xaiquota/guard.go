@@ -308,7 +308,13 @@ func (g *Guard) HandleUsage(ev UsageEvent) {
 	// Region/model availability (IP/egress): never delete.
 	if IsModelRegionUnavailable(ev.StatusCode, ev.Body) {
 		g.logf("warn", "xAI 区域/模型不可用(不删号) auth=%s code=%d body=%s", authIndex, ev.StatusCode, truncate(ev.Body, 160))
-	g.appendAction("skip_region", "passive", authIndex, "", ev.Account, ev.StatusCode, "region", truncate(ev.Body, 160))
+		g.appendAction("skip_region", "passive", authIndex, "", ev.Account, ev.StatusCode, "region", truncate(ev.Body, 160))
+		return
+	}
+	// Platform high-demand / model capacity: never cool down accounts.
+	if IsPlatformCapacityExhausted(ev.StatusCode, ev.Body) {
+		g.logf("info", "xAI 平台高负载(不冷却) auth=%s code=%d body=%s", authIndex, ev.StatusCode, truncate(ev.Body, 160))
+		g.appendAction("skip_capacity", "passive", authIndex, "", ev.Account, ev.StatusCode, "platform_capacity", "resource-exhausted / high demand")
 		return
 	}
 	// Dead credentials: true 403 permission-denied / 401 invalid → delete immediately.
