@@ -57,8 +57,12 @@ func TestBuildMetricsViewLiveFilterAndDailyPool(t *testing.T) {
 	}
 	live := map[string]bool{"a1": true}
 	v := BuildMetricsViewOpts(10, 5, 5, st, true, live, live)
-	if v.QuotaTotalEst != 5*DefaultFreeLimit {
-		t.Fatalf("daily pool est=%d want %d (enabled*2M)", v.QuotaTotalEst, 5*DefaultFreeLimit)
+	// known a1 limit 1M + 4 unobserved * inferred 1M = 5M
+	if v.QuotaTotalEst != 5_000_000 {
+		t.Fatalf("daily pool est=%d want 5000000 (from snapshot limits)", v.QuotaTotalEst)
+	}
+	if v.DefaultLimitPerAcct != 1_000_000 {
+		t.Fatalf("inferred per-acct limit=%d want 1M", v.DefaultLimitPerAcct)
 	}
 	if v.QuotaKnownAccounts != 1 || v.RollingAccounts != 1 {
 		t.Fatalf("live filter known=%d rolling_acc=%d", v.QuotaKnownAccounts, v.RollingAccounts)
@@ -170,7 +174,7 @@ func TestBuildMetricsViewDailyPoolEnabledOnly(t *testing.T) {
 	st := UsageStats{DefaultLimitPerAcct: DefaultFreeLimit}
 	v := BuildMetricsViewOpts(522, 500, 22, st, true, nil, nil)
 	if v.QuotaTotalEst != 500*DefaultFreeLimit {
-		t.Fatalf("daily pool est=%d want %d", v.QuotaTotalEst, 500*DefaultFreeLimit)
+		t.Fatalf("daily pool est=%d want %d (no snapshots → fallback DefaultFreeLimit)", v.QuotaTotalEst, 500*DefaultFreeLimit)
 	}
 	if v.UnobservedAccounts != 500 {
 		t.Fatalf("unobs=%d want 500 (all enabled unobserved)", v.UnobservedAccounts)
@@ -240,6 +244,31 @@ func TestBuildMetricsViewEnabledOnlyAndCapActual(t *testing.T) {
 	v2 := BuildMetricsViewOpts(2, 0, 2, st, true, live, map[string]bool{})
 	if v2.RollingAccounts != 0 || v2.RollingUsedKnown != 0 {
 		t.Fatalf("no enabled => rolling empty got acc=%d used=%d", v2.RollingAccounts, v2.RollingUsedKnown)
+	}
+}
+
+
+func TestInferFreeLimitFromSnapshots(t *testing.T) {
+	st := UsageStats{
+		QuotaByAuth: map[string]*AccountQuotaSnapshot{
+			"a": {Limit: 1_000_000, Actual: 900_000},
+			"b": {Limit: 1_000_000, Actual: 100_000},
+			"c": {Limit: 2_000_000, Actual: 100_000}, // minority
+		},
+	}
+	lim := InferFreeLimitPerAccount(st, nil, map[string]bool{"a": true, "b": true, "c": true})
+	if lim != 1_000_000 {
+		t.Fatalf("modal limit=%d want 1M", lim)
+	}
+	// daily pool with include unobserved: 2 known 1M + 1 known 2M + 2 unobs * 1M
+	// enabled=5, known=3 → unobs=2 → total = 1M+1M+2M + 2*1M = 7M
+	en := map[string]bool{"a": true, "b": true, "c": true, "d": true, "e": true}
+	v := BuildMetricsViewOpts(5, 5, 0, st, true, en, en)
+	if v.QuotaTotalEst != 6_000_000 {
+		t.Fatalf("pool=%d want 6M", v.QuotaTotalEst)
+	}
+	if v.RollingLimitKnown != 4_000_000 {
+		t.Fatalf("rolling limit known=%d want 4M", v.RollingLimitKnown)
 	}
 }
 

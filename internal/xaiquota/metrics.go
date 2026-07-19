@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// DefaultFreeLimit is the free-tier rolling window token limit used for daily pool estimates.
-// Product default: 2M tokens / account / rolling 24h (observed in live free-usage limit samples).
-const DefaultFreeLimit int64 = 2_000_000
+// DefaultFreeLimit is the fallback free-tier rolling window token limit per account.
+// Prefer InferFreeLimitPerAccount from live free-usage snapshots (often 1M; previously 2M).
+const DefaultFreeLimit int64 = 1_000_000
 
 // ZeroTokenAlertThreshold consecutive successful xAI events with empty Detail.
 const ZeroTokenAlertThreshold int64 = 5
@@ -361,12 +361,57 @@ func BuildMetricsView(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats) Metr
 	return BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled, st, false, nil, nil)
 }
 
+// InferFreeLimitPerAccount returns the modal free-usage limit from snapshots
+// (filtered by enabledAuth, else liveAuth, else all). Fallback: DefaultFreeLimit.
+// Grok free tier currently reports limit≈1M in free-usage-exhausted bodies.
+func InferFreeLimitPerAccount(st UsageStats, liveAuth, enabledAuth map[string]bool) int64 {
+	st = *EnsureUsageStats(&st)
+	freq := map[int64]int{}
+	for k, q := range st.QuotaByAuth {
+		if q == nil || q.Limit <= 0 {
+			continue
+		}
+		if enabledAuth != nil {
+			if !enabledAuth[k] {
+				continue
+			}
+		} else if liveAuth != nil {
+			if _, ok := liveAuth[k]; !ok {
+				continue
+			}
+		}
+		freq[q.Limit]++
+	}
+	// If enabled set has no snapshots, fall back to all live / all snapshots.
+	if len(freq) == 0 && enabledAuth != nil {
+		return InferFreeLimitPerAccount(st, liveAuth, nil)
+	}
+	if len(freq) == 0 && liveAuth != nil {
+		return InferFreeLimitPerAccount(st, nil, nil)
+	}
+	if len(freq) == 0 {
+		return DefaultFreeLimit
+	}
+	var bestLim int64
+	bestN := -1
+	for lim, n := range freq {
+		if n > bestN || (n == bestN && lim > bestLim) {
+			bestN = n
+			bestLim = lim
+		}
+	}
+	if bestLim <= 0 {
+		return DefaultFreeLimit
+	}
+	return bestLim
+}
+
 // BuildMetricsViewOpts:
-//   - Daily total quota (QuotaTotalEst) = enabled xAI * DefaultFreeLimit (2M rolling 24h each).
-//     Disabled credentials are NOT capacity; includeUnobservedEst=false → known enabled limits only.
-//   - Used today/total = usage.handle real tokens only (no free-usage actual floor, no success×N).
-//   - Rolling used/limit = free-usage snapshots for **enabled** accounts only (not disabled/deleted).
-//   - actual is capped at limit when summing (Grok free-usage often reports actual>limit).
+//   - Daily total quota: sum of known free-usage limits on enabled accounts +
+//     unobserved_enabled * inferred_per_account_limit (from snapshots, not hard-coded 2M).
+//   - Used today/total = usage.handle real tokens only.
+//   - Rolling used/limit = free-usage snapshots for **enabled** accounts only.
+//   - actual is capped at limit when summing (Grok often reports actual>limit).
 func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, includeUnobservedEst bool, liveAuth, enabledAuth map[string]bool) MetricsView {
 	st = *EnsureUsageStats(&st)
 	var usedKnown, limitKnown int64
@@ -375,7 +420,6 @@ func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, 
 		if q == nil || q.Limit <= 0 {
 			continue
 		}
-		// Prefer enabled set for rolling pool; fall back to live presence; else all snapshots.
 		if enabledAuth != nil {
 			if !enabledAuth[k] {
 				continue
@@ -386,7 +430,6 @@ func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, 
 			}
 		}
 		known++
-		// Cap actual at limit: exhausted bodies often show actual slightly over limit.
 		act := q.Actual
 		if act < 0 {
 			act = 0
@@ -397,27 +440,22 @@ func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, 
 		usedKnown += act
 		limitKnown += q.Limit
 	}
-	def := DefaultFreeLimit
-	// Daily free-tier capacity: each ENABLED account ≈ 2M / rolling 24h.
-	dailyCapEnabled := int64(xaiEnabled) * def
+	def := InferFreeLimitPerAccount(st, liveAuth, enabledAuth)
 	unobservedEnabled := xaiEnabled - known
 	if unobservedEnabled < 0 {
 		unobservedEnabled = 0
 	}
 	var totalEst int64
 	if includeUnobservedEst {
-		totalEst = dailyCapEnabled
+		// Known accounts use their real snapshot limit; fill rest with inferred modal limit.
+		totalEst = limitKnown + int64(unobservedEnabled)*def
 	} else {
 		totalEst = limitKnown
 	}
 	if xaiEnabled == 0 {
 		totalEst = 0
 	}
-	if totalEst > dailyCapEnabled && dailyCapEnabled > 0 {
-		totalEst = dailyCapEnabled
-	}
 
-	// Real usage only — never floor with rolling actual (that mixes 24h window into "used total").
 	usedTodayDisplay := st.UsedToday
 	usedTotalDisplay := st.UsedTotal
 
@@ -427,7 +465,7 @@ func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, 
 		alertMsg = "连续成功请求缺少 usage Detail token，可能 CPA 未发布用量明细；日历今日累计可能偏低。"
 	}
 
-	note := "仅xAI；日额度池=启用×2M(rolling 24h)；日历今日/累计=usage.handle 真实token(非快照)；滚动池=启用号 free-usage 快照(actual封顶limit)；禁用不计入。"
+	note := "仅xAI；日额度池=启用号 free-usage limit 合计(缺快照用众数单号上限)；日历今日/累计=usage.handle；滚动池=启用快照(actual≤limit)；禁用不计入。"
 	return MetricsView{
 		XAITotal:              xaiTotal,
 		XAIEnabled:            xaiEnabled,

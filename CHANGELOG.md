@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.27
+
+### 日额度池跟随 free-usage limit
+- 单号上限默认改为 **1M**（与当前 Grok free-usage `limit` 一致）
+- 从启用号 free-usage 快照 **众数 limit** 推断 `default_limit_per_acct`
+- 日额度池 = 已知启用快照 limit 合计 + 未观测启用数 × 推断单号上限（不再写死 2M）
+- 账号「滚 actual/limit」满额时展示封顶值，避免 actual>limit 看起来像系统算错
+
 ## 0.3.26
 
 ### 额度展示修正

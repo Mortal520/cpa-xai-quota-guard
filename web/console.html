@@ -303,7 +303,7 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
       <div class="stats-group">
         <h3>额度（仅 xAI）</h3>
         <div class="stats">
-          <div class="stat accent"><span class="lbl">日额度池(估)</span><b id="sQuotaTotal">0</b><div class="sub" id="sQuotaKnown">启用凭证×2M · 24h滚动</div></div>
+          <div class="stat accent"><span class="lbl">日额度池(估)</span><b id="sQuotaTotal">0</b><div class="sub" id="sQuotaKnown">启用×快照limit · 24h滚动</div></div>
           <div class="stat accent"><span class="lbl">已用 · 日历今日</span><b id="sUsedToday">0</b><div class="sub" id="sDayKey">usage 事件累计 · 非滚动快照</div></div>
           <div class="stat accent"><span class="lbl">滚动快照 used/limit</span><b id="sRolling">0</b><div class="sub" id="sRollingSub">仅启用号 free-usage · actual≤limit</div></div>
           <div class="stat accent"><span class="lbl">已用 · 累计(插件)</span><b id="sUsedTotal">0</b><div class="sub" id="sUsedNote">插件生命周期 usage 累计 · 非官方账单</div>
@@ -1188,10 +1188,10 @@ function paintStatusBar(d){
   const qk = document.getElementById("sQuotaKnown");
   if(qk){
     const known=m.quota_known_accounts||0, total=xaiN, rest=m.unobserved_accounts!=null?m.unobserved_accounts:Math.max(0,total-known);
-    const defL = m.default_limit_per_acct || 2000000;
+    const defL = m.default_limit_per_acct || 1000000;
     const en = m.xai_enabled||0;
-    const mode = m.include_unobserved_est ? ("启用×"+fmtToken(defL)+"≈日池") : "仅存活快照 limit 合计";
-    qk.textContent = mode + " · 启用 " + en + " · 快照 " + known + " · 未观测启用≈" + rest;
+    const mode = m.include_unobserved_est ? ("已知limit+未观测×"+fmtToken(defL)) : "仅启用快照 limit 合计";
+    qk.textContent = mode + " · 启用 " + en + " · 快照 " + known + " · 未观测≈" + rest + " · 单号上限 " + fmtToken(defL);
   }
   setToken("sUsedToday", (m.used_today_display != null ? m.used_today_display : (m.used_today||0)));
   const roll = document.getElementById("sRolling");
@@ -1395,7 +1395,9 @@ function renderAccountTable(){
     const usedMain = fmtToken(a.used_today||0);
     let chips = '<span class="chip">请求 '+(a.requests_today||0)+'</span>';
     if(a.rolling_actual!=null){
-      chips += '<span class="chip'+(over?' over':'')+'">滚 '+fmtToken(a.rolling_actual)+'/'+(a.rolling_limit?fmtToken(a.rolling_limit):'?')+(over?' 超限':'')+'</span>';
+      var ra = Number(a.rolling_actual||0), rl = Number(a.rolling_limit||0);
+      var showA = (rl>0 && ra>rl) ? rl : ra;
+      chips += '<span class="chip'+(over?' over':'')+'" title="free-usage 滚动 actual/limit'+(over?('；上报actual='+fmtToken(ra)+' 已超 limit'):'')+'">滚 '+fmtToken(showA)+'/'+(rl?fmtToken(rl):'?')+(over?' 满额':'')+'</span>';
     }
     if(a.last_tokens){ chips += '<span class="chip hot">近 '+fmtToken(a.last_tokens)+'</span>'; }
     if(a.cpa_success!=null && Number(a.cpa_success)>0){ chips += '<span class="chip">CPA成功 '+a.cpa_success+'</span>'; }
