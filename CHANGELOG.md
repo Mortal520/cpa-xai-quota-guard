@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.23
+
+### 修复 plugin_auto 停用标识丢失
+- **根因**：`state` 拉取 auth-files 失败时 `inv` 为空，`PruneMissingInventory` 把全部自动停用记录当「凭证已删除」清掉
+- 仅在 inventory 列表成功且非「空库存+仍有冷却记录」时才 prune
+- `MarkActive` 保留 `last_cooldown_*` 痕迹，恢复后仍可追溯上次程序停用原因
+
+
 ## 0.3.22
 
 ### 状态栏「可用」修正

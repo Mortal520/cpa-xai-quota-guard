@@ -1086,6 +1086,14 @@ function tierTag(tier, protected){
   var mark = protected ? " ⚠" : "";
   return '<span class="tag" style="border-color:'+col+';color:'+col+'" title="'+(protected?"受保护套餐":"可清理候选")+'">'+esc(lab)+mark+'</span>';
 }
+function accountSignal(a){
+  if(!a) return "";
+  return String(a.signal || a.last_cooldown_signal || "");
+}
+function accountReason(a){
+  if(!a) return "";
+  return String(a.reason || a.last_cooldown_reason || "");
+}
 function signalKind(sig){
   const s = String(sig||"");
   if(!s) return "";
@@ -1330,8 +1338,8 @@ function renderAccountTable(){
     const h = accountHealth(a, nowMs);
     if(filter === "focus" && !isFocusHealth(h)) return false;
     if(filter === "auto" && h !== "auto" && h !== "due") return false;
-    if(filter === "sig_free" && signalKind(a.signal) !== "free") return false;
-    if(filter === "sig_spending" && signalKind(a.signal) !== "spending") return false;
+    if(filter === "sig_free" && signalKind(accountSignal(a)) !== "free") return false;
+    if(filter === "sig_spending" && signalKind(accountSignal(a)) !== "spending") return false;
     if(filter === "tier_free" && String(a.tier||"free") !== "free") return false;
     if(filter === "tier_super" && String(a.tier||"") !== "super") return false;
     if(filter === "tier_heavy" && String(a.tier||"") !== "heavy") return false;
@@ -1343,7 +1351,7 @@ function renderAccountTable(){
     if(filter === "cpa_disabled" && h !== "cpa_disabled") return false;
     if(filter === "over" && !(a.rolling_over || (a.rolling_limit>0 && a.rolling_actual>a.rolling_limit) || h==="over")) return false;
     if(q){
-      const hay = ((a.account||"")+" "+(a.file_name||"")+" "+(a.auth_index||"")+" "+(a.signal||"")+" "+(a.reason||"")+" "+(a.state||"")+" "+(a.disable_source||"")).toLowerCase();
+      const hay = ((a.account||"")+" "+(a.file_name||"")+" "+(a.auth_index||"")+" "+(a.signal||"")+" "+(accountReason(a))+" "+(a.state||"")+" "+(a.disable_source||"")).toLowerCase();
       if(hay.indexOf(q) < 0) return false;
     }
     return true;
@@ -1412,7 +1420,7 @@ function renderAccountTable(){
       '<td><div class="stack">'+stateTag(a.state,a.disable_source,health)+
         ((srcLabel && srcLabel!=="—")?'<div class="muted" style="font-size:.7rem;margin-top:.12rem">'+esc(srcLabel)+'</div>':'')+
       '</div></td>'+
-      '<td>'+signalTag(a.signal)+'</td>'+
+      '<td>'+signalTag(accountSignal(a))+'</td>'+
       '<td><div class="stack">'+
         '<div class="recover-main">'+esc(recoverMain)+'</div>'+
         '<div data-recover-ms="'+(a.recover_at_ms||0)+'" class="recover-left '+(cd.due?'err':'muted')+'">'+esc(cd.text)+'</div>'+

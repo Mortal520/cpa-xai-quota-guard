@@ -331,8 +331,9 @@ func stateResponse(req managementRequest) ([]byte, error) {
 	}
 
 	// Single auth-files list (used for both inventory metrics and account merge).
-	inv, err := newMgmtAuth(cfg).List()
-	if err != nil {
+	inv, invErr := newMgmtAuth(cfg).List()
+	invOK := invErr == nil
+	if invErr != nil {
 		inv = nil
 	}
 	byIndex := map[string]xaiquota.AuthFile{}
@@ -358,11 +359,23 @@ func stateResponse(req managementRequest) ([]byte, error) {
 		byIndex[f.AuthIndex] = f
 		inCPA[f.AuthIndex] = true
 	}
-	// Drop plugin state for credentials no longer present in CPA inventory.
-	// Previously we re-injected missing tracked keys as ghosts, so deleted/re-enabled
-	// accounts stayed wrong in the account table until manual cleanup.
-	if n := g.PruneMissingInventory(inCPA); n > 0 {
-		tracked = g.Snapshot()
+	// Drop plugin state only when inventory list succeeded.
+	// BUGFIX: on list failure inv/inCPA was empty and PruneMissingInventory wiped ALL
+	// plugin_auto cooldowns (auto-disable markers "lost" after refresh/restart race).
+	if invOK {
+		// Extra guard: never treat a sudden empty inventory as "delete everything"
+		// when we still track plugin_auto cooldowns (transient auth-files glitch).
+		autoTracked := 0
+		for _, rec := range tracked {
+			if rec.State == xaiquota.StateAutoDisabled && rec.DisableSource == xaiquota.SourcePluginAuto {
+				autoTracked++
+			}
+		}
+		if len(inCPA) == 0 && autoTracked > 0 {
+			// keep state; do not prune
+		} else if n := g.PruneMissingInventory(inCPA); n > 0 {
+			tracked = g.Snapshot()
+		}
 	}
 
 	// Focus view: only materialize tracked/hot accounts into the table payload.
@@ -460,6 +473,10 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			item["reason"] = htmlUnescapeBasic(rec.Reason)
 			item["signal"] = rec.Signal
 			item["updated_at_ms"] = rec.UpdatedAtMS
+			item["last_cooldown_signal"] = rec.LastCooldownSignal
+			item["last_cooldown_reason"] = htmlUnescapeBasic(rec.LastCooldownReason)
+			item["last_cooldown_disabled_at_ms"] = rec.LastCooldownDisabledAtMS
+			item["last_cooldown_recover_at_ms"] = rec.LastCooldownRecoverAtMS
 			if rec.State == xaiquota.StateAutoDisabled {
 				autoN++
 				if effRecover > 0 && now >= effRecover {

@@ -749,13 +749,30 @@ func (g *Guard) PruneMissingInventory(inCPA map[string]bool) int {
 	if inCPA == nil {
 		return 0
 	}
+	// Empty inventory: refuse mass-delete of tracked plugin_auto records (list glitch / wrong key).
+	if len(inCPA) == 0 {
+		snap := g.Snapshot()
+		for _, rec := range snap {
+			if rec.State == StateAutoDisabled && rec.DisableSource == SourcePluginAuto {
+				g.logf("warn", "skip prune: empty inventory but %d+ tracked cooldowns present", 1)
+				return 0
+			}
+		}
+	}
 	snap := g.Snapshot()
 	n := 0
-	for k := range snap {
-		if !inCPA[k] {
-			if err := g.storeRemove(k); err == nil {
-				n++
-			}
+	for k, rec := range snap {
+		if inCPA[k] {
+			continue
+		}
+		// Never drop live plugin_auto cooldown solely because inventory briefly omitted the key
+		// unless we have a successful non-empty inventory (caller should ensure invOK).
+		if rec.State == StateAutoDisabled && rec.DisableSource == SourcePluginAuto && rec.Owner == Owner {
+			// still prune if truly gone — credential deleted from CPA
+			// keep prune for missing keys when inventory is non-empty
+		}
+		if err := g.storeRemove(k); err == nil {
+			n++
 		}
 	}
 	return n

@@ -34,6 +34,11 @@ type AccountRecord struct {
 	Owner         string `json:"owner,omitempty"`
 	Reason        string `json:"reason,omitempty"`
 	Signal        string `json:"signal,omitempty"`
+	// LastCooldown* survives MarkActive so UI/history does not "forget" why it was auto-disabled.
+	LastCooldownSignal      string `json:"last_cooldown_signal,omitempty"`
+	LastCooldownReason      string `json:"last_cooldown_reason,omitempty"`
+	LastCooldownDisabledAtMS int64  `json:"last_cooldown_disabled_at_ms,omitempty"`
+	LastCooldownRecoverAtMS  int64  `json:"last_cooldown_recover_at_ms,omitempty"`
 	LastProbeModel string `json:"last_probe_model,omitempty"`
 	LastEventHash string `json:"last_event_hash,omitempty"`
 	UpdatedAtMS   int64  `json:"updated_at_ms,omitempty"`
@@ -194,6 +199,21 @@ func (s *Store) MarkActive(authIndex string) error {
 	rec := s.Accounts[authIndex]
 	if rec == nil {
 		return nil
+	}
+	// Preserve last auto-cooldown identity before clearing live disable fields.
+	if rec.State == StateAutoDisabled && rec.DisableSource == SourcePluginAuto {
+		if rec.Signal != "" {
+			rec.LastCooldownSignal = rec.Signal
+		}
+		if rec.Reason != "" {
+			rec.LastCooldownReason = rec.Reason
+		}
+		if rec.DisabledAtMS > 0 {
+			rec.LastCooldownDisabledAtMS = rec.DisabledAtMS
+		}
+		if rec.RecoverAtMS > 0 {
+			rec.LastCooldownRecoverAtMS = rec.RecoverAtMS
+		}
 	}
 	rec.State = StateActive
 	rec.DisableSource = SourceNone
