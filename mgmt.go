@@ -68,6 +68,84 @@ var (
 const authListCacheTTL = 12 * time.Second
 const authListStaleMax = 10 * time.Minute
 
+// Auth-fail circuit breaker: wrong CPAMP key must not hammer CPA management and trip IP ban.
+var (
+	mgmtAuthCBMu       sync.Mutex
+	mgmtAuthCBUntil    time.Time
+	mgmtAuthCBLast     string
+	mgmtAuthCBHits     int
+	mgmtAuthCBOpenHits int
+)
+
+const mgmtAuthCBCooldown = 5 * time.Minute
+const mgmtAuthCBTripAfter = 3
+
+func mgmtAuthCircuitOpen() (open bool, remain time.Duration, last string) {
+	mgmtAuthCBMu.Lock()
+	defer mgmtAuthCBMu.Unlock()
+	if mgmtAuthCBUntil.IsZero() {
+		return false, 0, ""
+	}
+	left := time.Until(mgmtAuthCBUntil)
+	if left <= 0 {
+		mgmtAuthCBUntil = time.Time{}
+		mgmtAuthCBHits = 0
+		return false, 0, ""
+	}
+	return true, left, mgmtAuthCBLast
+}
+
+func noteMgmtAuthFailure(msg string) {
+	mgmtAuthCBMu.Lock()
+	defer mgmtAuthCBMu.Unlock()
+	mgmtAuthCBHits++
+	mgmtAuthCBLast = truncate(msg, 160)
+	if mgmtAuthCBHits >= mgmtAuthCBTripAfter {
+		mgmtAuthCBUntil = time.Now().Add(mgmtAuthCBCooldown)
+		mgmtAuthCBOpenHits++
+		hostLog("warn", fmt.Sprintf("[cpa-xai-quota-guard] CPA management 鉴权失败熔断 %s (hits=%d) — 停止对 8317 重试以免封 IP。请确认 management_key 是 CPA 密钥而非 CPAMP 密钥。", mgmtAuthCBCooldown, mgmtAuthCBHits))
+	}
+}
+
+func clearMgmtAuthCircuit() {
+	mgmtAuthCBMu.Lock()
+	defer mgmtAuthCBMu.Unlock()
+	mgmtAuthCBUntil = time.Time{}
+	mgmtAuthCBHits = 0
+	mgmtAuthCBLast = ""
+}
+
+func isMgmtAuthHTTPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "status 401") || strings.Contains(s, "status 403") ||
+		strings.Contains(s, "unauthorized") || strings.Contains(s, "invalid management") ||
+		strings.Contains(s, "forbidden")
+}
+
+// probeManagementKey validates key against CPA before bind/persist.
+func probeManagementKey(base, key string) error {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	key = strings.TrimSpace(key)
+	if base == "" || key == "" {
+		return fmt.Errorf("empty management base or key")
+	}
+	// Explicit bind always probes (bypass open circuit) so a corrected CPA key can recover.
+	_, err := mgmtHTTP(http.MethodGet, base+"/v0/management/auth-files", nil, key)
+	if err != nil {
+		if isMgmtAuthHTTPError(err) {
+			noteMgmtAuthFailure(err.Error())
+			return fmt.Errorf("CPA 拒绝该 Key（401/403）。请填 CPA management 密钥，不要用 CPAMP(:18317) 管理密码。详情: %w", err)
+		}
+		return err
+	}
+	clearMgmtAuthCircuit()
+	return nil
+}
+
+
 type authListMeta struct {
 	OK        bool   `json:"ok"`
 	Stale     bool   `json:"stale"`
@@ -125,6 +203,18 @@ func (m *mgmtAuth) List() ([]xaiquota.AuthFile, error) {
 	if m == nil || m.url == "" || m.key == "" {
 		return nil, fmt.Errorf("management not configured")
 	}
+	if open, left, last := mgmtAuthCircuitOpen(); open {
+		// Prefer sticky cache over hammering CPA with bad key.
+		authListCacheMu.Lock()
+		stale := copyAuthFiles(authListCacheData)
+		authListLastErr = fmt.Sprintf("auth circuit open %s: %s", left.Round(time.Second), last)
+		authListLastStale = true
+		authListCacheMu.Unlock()
+		if len(stale) > 0 {
+			return stale, nil
+		}
+		return nil, fmt.Errorf("management auth circuit open for %s (stop hammering CPA to avoid IP ban): %s", left.Round(time.Second), last)
+	}
 	cacheKey := m.url + "|" + m.key
 	authListCacheMu.Lock()
 	if len(authListCacheData) > 0 && authListCacheKey == cacheKey && time.Since(authListCacheAt) < authListCacheTTL {
@@ -142,6 +232,9 @@ func (m *mgmtAuth) List() ([]xaiquota.AuthFile, error) {
 
 	body, err := mgmtHTTP(http.MethodGet, m.url+"/v0/management/auth-files", nil, m.key)
 	if err != nil {
+		if isMgmtAuthHTTPError(err) {
+			noteMgmtAuthFailure(err.Error())
+		}
 		// sticky fallback: never force zero inventory into UI/metrics on transient errors
 		if len(staleSnap) > 0 && staleKey == cacheKey && !staleAt.IsZero() && time.Since(staleAt) < authListStaleMax {
 			authListCacheMu.Lock()
@@ -209,6 +302,7 @@ func (m *mgmtAuth) List() ([]xaiquota.AuthFile, error) {
 	authListLastEn = xe
 	authListLastDis = xd
 	authListCacheMu.Unlock()
+	clearMgmtAuthCircuit()
 	return out, nil
 }
 

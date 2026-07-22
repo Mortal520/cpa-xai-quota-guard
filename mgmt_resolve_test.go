@@ -69,3 +69,25 @@ func TestIsLoopbackHost(t *testing.T) {
 		t.Fatal("lan not loopback")
 	}
 }
+
+
+func TestResolveManagementKey_ConfigAndEnvBeatRuntime(t *testing.T) {
+	os.Unsetenv("MANAGEMENT_PASSWORD")
+	os.Unsetenv("CPA_MANAGEMENT_KEY")
+	os.Unsetenv("MANAGEMENT_KEY")
+	setRuntimeManagementKey("browser-wrong")
+	defer setRuntimeManagementKey("")
+	if resolveManagementKey("from-yaml") != "from-yaml" {
+		t.Fatal("yaml/config must beat browser runtime")
+	}
+	os.Setenv("CPA_MANAGEMENT_KEY", "from-env")
+	defer os.Unsetenv("CPA_MANAGEMENT_KEY")
+	if resolveManagementKey("") != "from-env" {
+		t.Fatalf("env must beat browser runtime, got %q", resolveManagementKey(""))
+	}
+	os.Unsetenv("CPA_MANAGEMENT_KEY")
+	if resolveManagementKey("") != "browser-wrong" {
+		t.Fatal("runtime only when config+env empty")
+	}
+}
+

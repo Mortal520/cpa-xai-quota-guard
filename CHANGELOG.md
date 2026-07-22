@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.28
+
+### 修复 CPAMP 打开导致 CPA 封 IP
+- **根因**：从 CPAMP(:18317) 打开时，插件把面板密码当 CPA Key，并 dopt/ind-key 写进进程，对 :8317 连续 401 → 封 IP
+- **进程**：不再每次请求 adopt 浏览器 Key；config/env 优先于 runtime；ind-key 先对 CPA 探测校验
+- **401 熔断**：auth-files 鉴权失败 3 次后冷却 5 分钟，停止硬打 8317
+- **UI Key 规则**：
+  - 已有插件本地 Key → 直接复用
+  - 无 Key + CPA 打开 → 自动读 CPA 面板 Key 并校验保存
+  - 无 Key + CPAMP 打开 → **不**自动读面板密码，提示手动填 CPA Key
+  - Key 访问异常 → 立即停轮询/巡查探测，横幅提醒重设
+
 ## 0.3.27
 
 ### 日额度池跟随 free-usage limit

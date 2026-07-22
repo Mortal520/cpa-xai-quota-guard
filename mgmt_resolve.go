@@ -122,54 +122,54 @@ func resolveManagementBaseURL(cfgURL string) string {
 }
 
 // resolveManagementKey: one CPA management key for pure CPA.
-// Order: yaml/config → runtime (browser-bound) → env.
+// Order: yaml/config → env → runtime (browser-bound via explicit bind-key only).
+// IMPORTANT: config/env always beat browser runtime so a wrong CPAMP panel key
+// cannot hijack in-process auth-files calls against CPA :8317 (which would 401-storm and ban IP).
 func resolveManagementKey(cfgKey string) string {
 	if k := strings.TrimSpace(cfgKey); k != "" {
 		return k
 	}
-	if k := getRuntimeManagementKey(); k != "" {
+	if k := firstNonEmpty(os.Getenv("MANAGEMENT_PASSWORD"), os.Getenv("CPA_MANAGEMENT_KEY"), os.Getenv("MANAGEMENT_KEY")); k != "" {
 		return k
 	}
-	return firstNonEmpty(os.Getenv("MANAGEMENT_PASSWORD"), os.Getenv("CPA_MANAGEMENT_KEY"), os.Getenv("MANAGEMENT_KEY"))
+	return getRuntimeManagementKey()
 }
 
-// adoptManagementKeyFromHeaders mirrors grok-inspection: page X-Management-Key / Bearer
-// is the process key when yaml/env is empty (pure CPA single-key).
-func adoptManagementKeyFromHeaders(h http.Header) {
+// extractManagementKeyFromHeaders returns X-Management-Key or Bearer token (no side effects).
+func extractManagementKeyFromHeaders(h http.Header) string {
 	if h == nil {
-		return
+		return ""
 	}
-	key := ""
 	if v := strings.TrimSpace(h.Get("X-Management-Key")); v != "" {
-		key = v
-	} else {
+		return v
+	}
+	for k, vals := range h {
+		if strings.EqualFold(strings.TrimSpace(k), "X-Management-Key") && len(vals) > 0 {
+			return strings.TrimSpace(vals[0])
+		}
+	}
+	auth := strings.TrimSpace(h.Get("Authorization"))
+	if auth == "" {
 		for k, vals := range h {
-			if strings.EqualFold(strings.TrimSpace(k), "X-Management-Key") && len(vals) > 0 {
-				key = strings.TrimSpace(vals[0])
+			if strings.EqualFold(strings.TrimSpace(k), "Authorization") && len(vals) > 0 {
+				auth = strings.TrimSpace(vals[0])
 				break
 			}
 		}
 	}
-	if key == "" {
-		auth := strings.TrimSpace(h.Get("Authorization"))
-		if auth == "" {
-			for k, vals := range h {
-				if strings.EqualFold(strings.TrimSpace(k), "Authorization") && len(vals) > 0 {
-					auth = strings.TrimSpace(vals[0])
-					break
-				}
-			}
-		}
-		const pfx = "bearer "
-		if len(auth) > len(pfx) && strings.EqualFold(auth[:len(pfx)], pfx) {
-			key = strings.TrimSpace(auth[len(pfx):])
-		}
+	const pfx = "bearer "
+	if len(auth) > len(pfx) && strings.EqualFold(auth[:len(pfx)], pfx) {
+		return strings.TrimSpace(auth[len(pfx):])
 	}
-	if key == "" {
-		return
-	}
-	// Always refresh runtime to latest page key so process auth-files use the same secret.
-	setRuntimeManagementKey(key)
+	return ""
+}
+
+// adoptManagementKeyFromHeaders is intentionally a NO-OP for process key.
+// Historical bug: every browser request (incl. CPAMP :18317 panel key) overwrote
+// runtime key → plugin process hammered CPA :8317 with wrong secret → IP ban / login block.
+// Process key is set only by: yaml, env, or explicit POST bind-key (validated).
+func adoptManagementKeyFromHeaders(h http.Header) {
+	_ = h
 }
 
 // managementKeySource reports how process key was resolved (no secret value).
@@ -177,11 +177,11 @@ func managementKeySource(cfgKey string) string {
 	if strings.TrimSpace(cfgKey) != "" {
 		return "config"
 	}
-	if getRuntimeManagementKey() != "" {
-		return "browser"
-	}
 	if firstNonEmpty(os.Getenv("MANAGEMENT_PASSWORD"), os.Getenv("CPA_MANAGEMENT_KEY"), os.Getenv("MANAGEMENT_KEY")) != "" {
 		return "env"
+	}
+	if getRuntimeManagementKey() != "" {
+		return "browser"
 	}
 	return "none"
 }

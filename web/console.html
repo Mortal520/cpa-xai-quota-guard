@@ -496,6 +496,67 @@ function setMgmtKey(v){
   try { localStorage.setItem(KEY_LS, v); } catch(e){}
   try { sessionStorage.setItem(KEY_LS, v); } catch(e){}
 }
+/** CPAMP (default :18317) vs CPA management (:8317). Wrong-host panel key must not hit CPA. */
+function pagePort(){ try{ return String(location.port||""); }catch(e){ return ""; } }
+function isLikelyCPAMPHost(){
+  var p = pagePort();
+  if(p === "18317" || p === "18318") return true;
+  try{
+    var h = String(location.hostname||"").toLowerCase();
+    var path = String(location.pathname||"").toLowerCase();
+    if(/cpamp|cpa-?plus|plus-?admin/.test(h+path)) return true;
+  }catch(e){}
+  return false;
+}
+function isLikelyCPAHost(){
+  var p = pagePort();
+  if(p === "8317" || p === "8318" || p === "8080") return true;
+  // no special port and not CPAMP → treat as CPA / pure management host
+  return !isLikelyCPAMPHost();
+}
+var ACCESS_STOPPED = false;
+var ACCESS_STOP_REASON = "";
+function stopAllPluginAccess(reason){
+  ACCESS_STOPPED = true;
+  ACCESS_STOP_REASON = String(reason||"key invalid");
+  try{ if(STATE_TIMER){ clearInterval(STATE_TIMER); STATE_TIMER = null; } }catch(e){}
+  try{ if(PATROL_POLL){ clearInterval(PATROL_POLL); PATROL_POLL = null; } }catch(e){}
+  try{ window._KEY_AUTOBIND_DONE = true; }catch(e){}
+  showAccessStoppedBanner(ACCESS_STOP_REASON);
+}
+function resumePluginAccess(){
+  ACCESS_STOPPED = false;
+  ACCESS_STOP_REASON = "";
+  hideAccessStoppedBanner();
+}
+function escEarly(s){ s=String(s==null?"":s); return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function showAccessStoppedBanner(msg){
+
+  var el = document.getElementById("accessStopBanner");
+  if(!el){
+    el = document.createElement("div");
+    el.id = "accessStopBanner";
+    el.className = "guide";
+    el.style.cssText = "display:block;margin:.75rem 0;border-color:var(--err);background:var(--btn-off-hover, #fef2f2);color:var(--err);";
+    var host = document.querySelector(".wrap") || document.body;
+    if(host.firstChild) host.insertBefore(el, host.firstChild);
+    else host.appendChild(el);
+  }
+  el.style.display = "block";
+  el.innerHTML = "<b>已停止访问 CPA</b>：避免错误密钥连续请求导致 8317 封 IP。<br>"+
+    escEarly(String(msg||""))+"<br>请检查并重新填写 <b>CPA</b> 的 Management Key（不要填 CPAMP 密码），然后点「保存并同步进程」。";
+}
+function hideAccessStoppedBanner(){
+  var el = document.getElementById("accessStopBanner");
+  if(el) el.style.display = "none";
+}
+function showCpampKeySetupHint(){
+  var hint = document.getElementById("cfgKeyHint");
+  var meta = document.getElementById("cfgMeta");
+  var msg = "当前从 CPAMP 打开：不会自动读取面板密码。请手动填写 CPA(:8317) 的 Management Key 并保存；之后使用本插件已保存的 Key。";
+  if(hint) hint.innerHTML = '<span class="err">'+msg+'</span>';
+  if(meta) meta.textContent = msg;
+}
 
 // Match Cli-Proxy-API-Management-Center reversible localStorage (enc::v1::) — same as grok-inspection.
 // Not a security boundary; only so we can reuse the panel's saved key.
@@ -571,7 +632,11 @@ function extractKeyFromPanelStorage(){
   } catch(e){}
   return "";
 }
-/** Absorb grok-inspection: auto-load CPA Management Key from panel or local plugin store. */
+/** Key rules:
+ * 1) Prefer plugin-saved key always (subsequent visits).
+ * 2) No saved key + CPA host → auto-read CPA panel localStorage and save.
+ * 3) No saved key + CPAMP host → do NOT auto-read CPAMP password; prompt user.
+ */
 function tryAutoFillManagementKey(){
   var own = "";
   try { own = localStorage.getItem(KEY_LS) || sessionStorage.getItem(KEY_LS) || ""; } catch(e){}
@@ -580,6 +645,11 @@ function tryAutoFillManagementKey(){
     KEY_SOURCE = "plugin";
     return { filled: true, source: "plugin", key: own };
   }
+  if(isLikelyCPAMPHost()){
+    KEY_SOURCE = "manual";
+    return { filled: false, source: "cpamp_need_setup", key: "" };
+  }
+  // CPA host (or unknown non-CPAMP): try panel storage once
   var panel = extractKeyFromPanelStorage();
   if(panel){
     setMgmtKey(panel);
@@ -757,6 +827,7 @@ function isPageVisible(){ return typeof document.hidden === "undefined" || !docu
 function scheduleStatePoll(){
   if(STATE_TIMER) clearInterval(STATE_TIMER);
   STATE_TIMER = setInterval(function(){
+    if(ACCESS_STOPPED) return;
     if(!isPageVisible()) return;
     if(LOADING_STATE) return;
     // during active patrol, patrolPoll owns status UI; skip full state to cut main-thread jank
@@ -769,6 +840,7 @@ function scheduleStatePoll(){
   }, STATE_POLL_MS);
 }
 function ensurePatrolFollow(){
+  if(ACCESS_STOPPED) return;
   try{ if(PATROL_POLL) return; }catch(e){ PATROL_POLL = null; }
   api("patrol/status?lite=1", {method:"GET"}).then(function(r){
     if(!r || !r.ok) return;
@@ -904,6 +976,9 @@ function normalizeStatePayload(d, nowOverride){
 }
 async function api(path, opts){
   opts = opts || {};
+  if(ACCESS_STOPPED && !(opts && opts.force_key_retry)){
+    return {ok:false, error: ACCESS_STOP_REASON || "access stopped: invalid key"};
+  }
   const hdrs = {"content-type":"application/json"};
   const k = mgmtKey();
   if(!k){ showKeyNeeded(); return {ok:false,error:"no key"}; }
@@ -927,7 +1002,11 @@ async function api(path, opts){
     return {ok:false, error:"network: "+msg};
   }
   if(timer) clearTimeout(timer);
-  if(r.status===401){ showKeyNeeded(); return {ok:false,error:"invalid management key"}; }
+  if(r.status===401 || r.status===403){
+    stopAllPluginAccess("Management Key 无效或无权访问（HTTP "+r.status+"）。请确认填写的是 CPA 密钥，不是 CPAMP 密码。");
+    showKeyNeeded();
+    return {ok:false,error:"invalid management key (http "+r.status+")"};
+  }
   if(!r.ok){
     let t=""; try{ t=await r.text(); }catch(e){}
     return {ok:false, error:"http "+r.status+" "+t.slice(0,120)};
@@ -1526,6 +1605,7 @@ function forceReloadState(){
 }
 async function loadState(opts){
   opts = opts || {};
+  if(ACCESS_STOPPED && !opts.force_key_retry) return;
   if((LOADING_STATE || LOAD_STATE_INFLIGHT) && opts.soft) return;
   if(LOAD_STATE_INFLIGHT && !opts.force) return;
   if(LOAD_STATE_INFLIGHT && opts.force){
@@ -1544,6 +1624,10 @@ async function loadState(opts){
     const r = await api("state?view="+encodeURIComponent(view), {timeout_ms: 20000});
     if(!r || !r.ok){
       const err = (r&&r.error? (typeof r.error==="string"?r.error:(r.error.message||"error")) : "无响应");
+      var es = String(err||"");
+      if(/invalid management key|http 401|http 403|circuit open|拒绝该 Key|封 IP/i.test(es)){
+        stopAllPluginAccess(es);
+      }
       clearLoadingUI(err);
       if(body){
         body.innerHTML = '<tr><td colspan="7" class="err">加载失败: '+esc(String(err))+'。请确认 Management Key；选「全部账号」更慢。</td></tr>';
@@ -1577,10 +1661,15 @@ async function loadState(opts){
     }
     const cfg = d.config || {};
     try{
-      if(mgmtKey() && cfg && cfg.management_key_set === false && !window._KEY_AUTOBIND_DONE){
+      // Only auto-bind when process has no key yet; never from CPAMP host auto-panel.
+      if(mgmtKey() && cfg && cfg.management_key_set === false && !window._KEY_AUTOBIND_DONE && isLikelyCPAHost() && !ACCESS_STOPPED){
         window._KEY_AUTOBIND_DONE = true;
         api("bind-key", {method:"POST", body:{key:mgmtKey(), persist:true}, timeout_ms:12000}).then(function(br){
-          if(br && br.ok){ loadState({force:true, soft:true}); }
+          if(br && br.ok && br.result && br.result.ok !== false){ loadState({force:true, soft:true}); }
+          else if(br && (br.ok === false || (br.result && br.result.ok === false))){
+            var em = (br.result && br.result.error) || br.error || "bind-key failed";
+            stopAllPluginAccess(String(em));
+          }
         }).catch(function(){});
       }
     }catch(e){}
@@ -1699,20 +1788,28 @@ function accountFingerprint(list){
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]);}); }
 async function saveKey(){
   const v = document.getElementById("cfgKey").value.trim();
-  if(!v){ alert("请填写 CPA X-Management-Key"); return; }
+  if(!v){ alert("请填写 CPA X-Management-Key（不要填 CPAMP 密码）"); return; }
   setMgmtKey(v);
+  KEY_SOURCE = "manual";
   try{
-    const r = await api("bind-key", {method:"POST", body:{key:v, persist:true}, timeout_ms:15000});
-    if(!r || r.ok === false){
-      alert("Key 已存浏览器，但同步进程失败: " + (r && r.error ? (typeof r.error==="string"?r.error:JSON.stringify(r.error)) : "无响应"));
-    } else {
-      var res = r.result || r;
-      if(res && res.persisted === false && res.error){ console.warn("bind-key runtime only", res.error); }
+    const r = await api("bind-key", {method:"POST", body:{key:v, persist:true}, timeout_ms:15000, force_key_retry:true});
+    var res = r && (r.result || r);
+    if(!r || r.ok === false || (res && res.ok === false)){
+      var em = (res && res.error) || (r && r.error) || "无响应";
+      if(typeof em !== "string") em = JSON.stringify(em);
+      stopAllPluginAccess(em);
+      alert("Key 校验失败，已停止访问以免封 IP:\n" + em + (res && res.hint ? ("\n"+res.hint) : ""));
+      return;
     }
+    if(res && res.persisted === false && res.error){ console.warn("bind-key runtime only", res.error); }
+    resumePluginAccess();
+    alert("已保存并校验 CPA Key" + (res && res.persisted ? "（已写入进程配置）" : "（进程内存有效）"));
+    loadState({force:true});
+    scheduleStatePoll();
   }catch(e){
+    stopAllPluginAccess(e && e.message ? e.message : String(e));
     alert("同步进程异常: " + (e && e.message ? e.message : e));
   }
-  loadState({force:true});
 }
 function ensurePatrolModelOption(id){
   if(!id) return;
@@ -1945,18 +2042,52 @@ async function togglePlugin(){
   try{ syncKeyUIHint(); }catch(e){}
   try{ bindPatrolFormDirty(); }catch(e){}
   if(!k){ try{ paintCfgMeta({}, {}); }catch(e){} }
-  // Pure CPA: auto-bind panel/local key into process so cooldown/patrol work without manual yaml.
-  if(k){
-    api("bind-key", {method:"POST", body:{key:k, persist:true}, timeout_ms:12000}).then(function(br){
-      loadState({force:true});
-    }).catch(function(){ loadState(); });
-  } else {
-    loadState();
+
+  // No saved key:
+  // - CPA host: panel key already filled above → validate via bind-key
+  // - CPAMP host: prompt only, do not poll / do not bind wrong password
+  if(!k){
+    if(isLikelyCPAMPHost() || fill.source === "cpamp_need_setup"){
+      showCpampKeySetupHint();
+      showKeyNeeded();
+      scheduleCountdown();
+      return;
+    }
+    // CPA host without panel key: still show hint; soft load may work if process key exists via host session
+    try{ loadState({soft:true}); }catch(e){}
+    scheduleStatePoll();
+    scheduleCountdown();
+    document.addEventListener("visibilitychange", function(){ if(!document.hidden && !ACCESS_STOPPED) loadState({soft:true}); });
+    return;
   }
-  // accounts/metrics sync only — form is not rewritten after first fill
+
+  // Has saved/plugin key: bind only when CPA host and process may lack key; always loadState.
+  // On CPAMP with already-saved CPA key: just use it (no panel steal).
+  var shouldBind = isLikelyCPAHost() && (fill.source === "panel" || fill.source === "plugin");
+  if(shouldBind){
+    api("bind-key", {method:"POST", body:{key:k, persist:true}, timeout_ms:12000}).then(function(br){
+      var res = br && (br.result || br);
+      if(br && br.ok && res && res.ok !== false){
+        resumePluginAccess();
+        loadState({force:true});
+      } else {
+        var em = (res && res.error) || (br && br.error) || "Key 校验失败";
+        // If process already has valid yaml key, state may still work without bind — try once.
+        loadState({force:true}).then(function(){
+          if(ACCESS_STOPPED) return;
+        });
+        // bind failure with explicit CPA reject → stop
+        if(/401|403|拒绝|invalid|circuit/i.test(String(em))){
+          stopAllPluginAccess(String(em));
+        }
+      }
+    }).catch(function(){ loadState({force:true}); });
+  } else {
+    loadState({force:true});
+  }
   scheduleStatePoll();
   scheduleCountdown();
-  document.addEventListener("visibilitychange", function(){ if(!document.hidden) loadState({soft:true}); });
+  document.addEventListener("visibilitychange", function(){ if(!document.hidden && !ACCESS_STOPPED) loadState({soft:true}); });
 })();
 // ===== Delete History: ONLY updated by loadState (not paintPatrol / 1s paintStatusBar) =====
 var DEL_HIST_FP = "";

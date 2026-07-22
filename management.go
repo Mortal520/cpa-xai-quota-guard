@@ -848,19 +848,30 @@ func bindKeyResponse(req managementRequest) ([]byte, error) {
 	_ = json.Unmarshal(req.Body, &body)
 	key := strings.TrimSpace(firstNonEmpty(body.Key, body.ManagementKey))
 	if key == "" {
-		// also accept header-only bind
-		adoptManagementKeyFromHeaders(req.Headers)
-		key = getRuntimeManagementKey()
+		// header-only bind (explicit bind-key only; no silent adopt on other routes)
+		key = extractManagementKeyFromHeaders(req.Headers)
 	}
 	if key == "" {
 		return jsonResponse(map[string]any{"ok": false, "error": "empty management key"})
 	}
-	setRuntimeManagementKey(key)
 
 	cfg := guard().Config()
+	base := resolveManagementBaseURL(cfg.ManagementURL)
+	// Validate against CPA before overwriting process key / yaml.
+	// Prevents CPAMP(:18317) panel password being stored as CPA key and 401-storming :8317.
+	if err := probeManagementKey(base, key); err != nil {
+		return jsonResponse(map[string]any{
+			"ok":             false,
+			"bound":          false,
+			"error":          err.Error(),
+			"hint":           "请使用 CPA 的 X-Management-Key / management password，不要使用 CPAMP 管理密码。错误密钥会导致 8317 鉴权失败并可能封 IP。",
+			"management_url": base,
+		})
+	}
+	setRuntimeManagementKey(key)
 	cfg.ManagementKey = key
 	if strings.TrimSpace(cfg.ManagementURL) == "" {
-		cfg.ManagementURL = resolveManagementBaseURL("")
+		cfg.ManagementURL = base
 	}
 	persist := true
 	if body.Persist != nil {
@@ -868,21 +879,21 @@ func bindKeyResponse(req managementRequest) ([]byte, error) {
 	}
 	persisted := false
 	if persist {
-		// Write into CPA plugin yaml so restarts keep pure-CPA working.
 		if err := writePluginConfig(cfg, map[string]any{
 			"management_key": key,
 			"management_url": resolveManagementBaseURL(cfg.ManagementURL),
 		}); err != nil {
-			// Still keep runtime key even if persist fails (e.g. self-call race).
+			// Runtime key already validated; keep it even if yaml write fails.
 			guard().ApplyConfig(cfg)
 			return jsonResponse(map[string]any{
-				"ok":          true,
-				"bound":       true,
-				"persisted":   false,
-				"error":       err.Error(),
-				"key_set":     true,
-				"key_source":  managementKeySource(cfg.ManagementKey),
+				"ok":             true,
+				"bound":          true,
+				"persisted":      false,
+				"error":          err.Error(),
+				"key_set":        true,
+				"key_source":     managementKeySource(cfg.ManagementKey),
 				"management_url": resolveManagementBaseURL(cfg.ManagementURL),
+				"note":           "key validated against CPA; yaml persist failed",
 			})
 		}
 		persisted = true
@@ -895,7 +906,7 @@ func bindKeyResponse(req managementRequest) ([]byte, error) {
 		"key_set":        true,
 		"key_source":     managementKeySource(cfg.ManagementKey),
 		"management_url": resolveManagementBaseURL(cfg.ManagementURL),
-		"note":           "browser key == process key (pure CPA)",
+		"note":           "browser key validated against CPA (not CPAMP)",
 	})
 }
 
