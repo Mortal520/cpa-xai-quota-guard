@@ -285,6 +285,38 @@ func (s *Store) DueAutoDisabled(now time.Time) []AccountRecord {
 }
 
 
+// LostPluginCooldownCandidates returns accounts that once had plugin_auto cooldown
+// (last_cooldown_* fingerprint) but no longer hold live auto_disabled ownership.
+// Tick uses these to restore markers or re-enable when recover time is due.
+func (s *Store) LostPluginCooldownCandidates() []AccountRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []AccountRecord
+	for _, rec := range s.Accounts {
+		if rec == nil {
+			continue
+		}
+		// Live owned cooldowns are handled by DueAutoDisabled.
+		if rec.State == StateAutoDisabled && rec.DisableSource == SourcePluginAuto && !rec.PreDisabled &&
+			(rec.Owner == "" || rec.Owner == Owner) {
+			continue
+		}
+		// True user_manual without any prior plugin cooldown fingerprint: skip.
+		if rec.DisableSource == SourceUserManual && rec.LastCooldownDisabledAtMS <= 0 && rec.LastCooldownRecoverAtMS <= 0 {
+			continue
+		}
+		if rec.LastCooldownDisabledAtMS <= 0 && rec.LastCooldownRecoverAtMS <= 0 {
+			continue
+		}
+		// Active / cleared ownership / mis-tagged manual with fingerprint.
+		if rec.State == StateActive || rec.DisableSource == SourceNone ||
+			rec.State == StateUserManualDisabled || rec.DisableSource == SourceUserManual {
+			out = append(out, *rec)
+		}
+	}
+	return out
+}
+
 func (s *Store) AppendDelete(ev DeleteEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

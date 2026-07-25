@@ -323,3 +323,112 @@ func TestGuardSpending402ClearedBySuccess(t *testing.T) {
 		t.Fatal("must not disable on first post-success 402")
 	}
 }
+
+// staleListAuth returns wrong Disabled=true→false on List, but real state in mem for SetDisabled.
+// Simulates TTL/sticky cache that caused Tick to MarkActive without enabling.
+type staleListAuth struct {
+	real          *memAuth
+	listDisabled  map[string]bool // override Disabled for List only
+	setCalls      int
+	lastSetEnable bool
+}
+
+func (s *staleListAuth) List() ([]AuthFile, error) {
+	files, err := s.real.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AuthFile, len(files))
+	copy(out, files)
+	for i := range out {
+		if v, ok := s.listDisabled[out[i].AuthIndex]; ok {
+			out[i].Disabled = v
+		}
+	}
+	return out, nil
+}
+
+func (s *staleListAuth) SetDisabled(authIndex string, disabled bool) (bool, error) {
+	s.setCalls++
+	s.lastSetEnable = !disabled
+	return s.real.SetDisabled(authIndex, disabled)
+}
+
+func (s *staleListAuth) Delete(authIndex string) error { return s.real.Delete(authIndex) }
+
+func TestTickAlwaysCallsSetDisabledEvenIfListSaysEnabled(t *testing.T) {
+	real := newMemAuth(AuthFile{AuthIndex: "stale1", Name: "xai-stale.json", Provider: "xai", Disabled: true})
+	stale := &staleListAuth{real: real, listDisabled: map[string]bool{"stale1": false}} // List lies: enabled
+	g, err := NewGuard(Config{Enabled: true, ManagementURL: "http://127.0.0.1:8317", ManagementKey: "test"}, stale, &memLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	_ = g.storeUpsert(AccountRecord{
+		AuthIndex: "stale1", FileName: "xai-stale.json", Provider: "xai",
+		DisableSource: SourcePluginAuto, State: StateAutoDisabled, Owner: Owner,
+		DisabledAtMS: now.Add(-2 * time.Hour).UnixMilli(),
+		RecoverAtMS:  now.Add(-time.Minute).UnixMilli(),
+		Signal:       "free_usage",
+	})
+	g.Tick()
+	if stale.setCalls < 1 {
+		t.Fatal("Tick must call SetDisabled even when List reports enabled")
+	}
+	files, _ := real.List()
+	if files[0].Disabled {
+		t.Fatal("expected real re-enable via SetDisabled")
+	}
+	rec := g.storeGet("stale1")
+	if rec != nil && rec.State == StateAutoDisabled {
+		t.Fatalf("expected cleared cooldown, got %#v", rec)
+	}
+}
+
+func TestTickHealsOrphanActiveWhileCPADisabled(t *testing.T) {
+	auth := newMemAuth(AuthFile{AuthIndex: "orph1", Name: "xai-orph.json", Provider: "xai", Disabled: true})
+	g, err := NewGuard(Config{Enabled: true, ManagementURL: "http://127.0.0.1:8317", ManagementKey: "test"}, auth, &memLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	// Ownership cleared (Active) but last_cooldown fingerprint remains; CPA still disabled.
+	_ = g.storeUpsert(AccountRecord{
+		AuthIndex: "orph1", FileName: "xai-orph.json", Provider: "xai",
+		DisableSource: SourceNone, State: StateActive,
+		LastCooldownSignal: "free_usage", LastCooldownReason: "quota",
+		LastCooldownDisabledAtMS: now.Add(-25 * time.Hour).UnixMilli(),
+		LastCooldownRecoverAtMS: now.Add(-time.Hour).UnixMilli(),
+	})
+	g.Tick()
+	files, _ := auth.List()
+	if files[0].Disabled {
+		t.Fatal("orphan due cooldown should be re-enabled")
+	}
+}
+
+func TestTickRestoresLostPluginAutoBeforeDue(t *testing.T) {
+	auth := newMemAuth(AuthFile{AuthIndex: "lost1", Name: "xai-lost.json", Provider: "xai", Disabled: true})
+	g, err := NewGuard(Config{Enabled: true, ManagementURL: "http://127.0.0.1:8317", ManagementKey: "test"}, auth, &memLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	_ = g.storeUpsert(AccountRecord{
+		AuthIndex: "lost1", FileName: "xai-lost.json", Provider: "xai",
+		DisableSource: SourceNone, State: StateActive,
+		LastCooldownSignal: "spending_limit",
+		LastCooldownDisabledAtMS: now.Add(-1 * time.Hour).UnixMilli(),
+		LastCooldownRecoverAtMS: now.Add(2 * time.Hour).UnixMilli(),
+	})
+	g.Tick()
+	files, _ := auth.List()
+	if !files[0].Disabled {
+		t.Fatal("must not enable before recover_at")
+	}
+	rec := g.storeGet("lost1")
+	if rec == nil || rec.State != StateAutoDisabled || rec.DisableSource != SourcePluginAuto || rec.Owner != Owner {
+		t.Fatalf("expected restored plugin_auto ownership, got %#v", rec)
+	}
+}
+

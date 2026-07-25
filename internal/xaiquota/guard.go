@@ -441,6 +441,49 @@ func (g *Guard) disableForMatch(authIndex string, ev UsageEvent, match MatchResu
 			g.appendAction("cooldown_extend", "passive", authIndex, current.Name, firstNonEmpty(ev.Account, current.Account), ev.StatusCode, match.Signal, match.Reason)
 			return
 		}
+		// Reclaim lost plugin_auto ownership instead of permanent user_manual.
+		if existing != nil && (existing.LastCooldownDisabledAtMS > 0 || existing.LastCooldownRecoverAtMS > 0 ||
+			(existing.DisableSource == SourcePluginAuto && existing.Owner == Owner)) {
+			rec := AccountRecord{
+				AuthIndex:                authIndex,
+				FileName:                 current.Name,
+				Provider:                 "xai",
+				Account:                  firstNonEmpty(ev.Account, current.Account, existing.Account),
+				DisableSource:            SourcePluginAuto,
+				State:                    StateAutoDisabled,
+				RecoverAtMS:              CoalesceRecoverAtMS(existing, match),
+				DisabledAtMS:             existing.DisabledAtMS,
+				PreDisabled:              false,
+				Owner:                    Owner,
+				Reason:                   match.Reason,
+				Signal:                   match.Signal,
+				LastEventHash:            ev.EventHash,
+				LastCooldownSignal:       firstNonEmpty(existing.LastCooldownSignal, existing.Signal),
+				LastCooldownReason:       firstNonEmpty(existing.LastCooldownReason, existing.Reason),
+				LastCooldownDisabledAtMS: existing.LastCooldownDisabledAtMS,
+				LastCooldownRecoverAtMS:  existing.LastCooldownRecoverAtMS,
+			}
+			if rec.DisabledAtMS <= 0 {
+				if existing.LastCooldownDisabledAtMS > 0 {
+					rec.DisabledAtMS = existing.LastCooldownDisabledAtMS
+				} else {
+					rec.DisabledAtMS = time.Now().UnixMilli()
+				}
+			}
+			if rec.RecoverAtMS <= 0 {
+				rec.RecoverAtMS = match.RecoverAt.UnixMilli()
+			}
+			if rec.LastCooldownDisabledAtMS <= 0 {
+				rec.LastCooldownDisabledAtMS = rec.DisabledAtMS
+			}
+			if rec.LastCooldownRecoverAtMS <= 0 {
+				rec.LastCooldownRecoverAtMS = rec.RecoverAtMS
+			}
+			_ = g.storeUpsert(rec)
+			g.logf("info", "已夺回丢失的 plugin_auto 所有权 auth=%s recover_at=%s", authIndex, time.UnixMilli(rec.RecoverAtMS).Format(time.RFC3339))
+			g.appendAction("heal_cooldown", "passive", authIndex, current.Name, firstNonEmpty(ev.Account, current.Account), ev.StatusCode, match.Signal, "reclaimed lost plugin_auto")
+			return
+		}
 		// Mark user manual and never auto-enable.
 		rec := AccountRecord{
 			AuthIndex:     authIndex,
@@ -518,7 +561,9 @@ func (g *Guard) disableForMatch(authIndex string, ev UsageEvent, match MatchResu
 	})
 }
 
-// Tick recovers due plugin_auto cooldowns.
+// Tick recovers due plugin_auto cooldowns and heals lost ownership markers.
+// Important: never clear plugin_auto solely because a cached List() says enabled —
+// always call SetDisabled(false) (mgmt layer force-refreshes inventory).
 func (g *Guard) Tick() {
 	cfg := g.Config()
 	if !cfg.Enabled {
@@ -527,39 +572,145 @@ func (g *Guard) Tick() {
 	if g.auth == nil {
 		return
 	}
-	due := g.storeDue(time.Now())
+	now := time.Now()
+	due := g.storeDue(now)
+	recovered, cleared, failed, healed := 0, 0, 0, 0
+	seen := map[string]struct{}{}
+
 	for _, rec := range due {
-		// Re-check ownership and current disabled state.
-		current, err := g.findAuth(rec.AuthIndex)
-		if err != nil {
-			g.logf("error", "恢复前查询失败 auth=%s: %v", rec.AuthIndex, err)
+		if _, ok := seen[rec.AuthIndex]; ok {
 			continue
 		}
-		if current == nil {
-			_ = g.storeRemove(rec.AuthIndex) // credential gone
-			continue
-		}
-		// Fresh state read.
+		seen[rec.AuthIndex] = struct{}{}
+
 		live := g.storeGet(rec.AuthIndex)
 		if live == nil || live.DisableSource != SourcePluginAuto || live.State != StateAutoDisabled || live.PreDisabled || (live.Owner != "" && live.Owner != Owner) {
 			continue
 		}
-		if !current.Disabled {
-			// Already enabled externally; clear our record.
-			_ = g.storeMarkActive(rec.AuthIndex)
-			g.logf("info", "账号已外部启用，清除 cooldown auth=%s", rec.AuthIndex)
-			continue
-		}
-		if _, err := g.auth.SetDisabled(rec.AuthIndex, false); err != nil {
+
+		// Always attempt enable via management API (force-fresh inside SetDisabled).
+		// Do NOT short-circuit on List()/findAuth Disabled=false — that path used to
+		// MarkActive while CPA still had the file disabled (sticky/TTL cache).
+		prev, err := g.auth.SetDisabled(rec.AuthIndex, false)
+		if err != nil {
+			errText := err.Error()
+			if strings.Contains(errText, "auth file not found") {
+				_ = g.storeRemove(rec.AuthIndex)
+				g.logf("info", "恢复时凭证已不存在，清除状态 auth=%s", rec.AuthIndex)
+				continue
+			}
 			g.logf("error", "自动恢复启用失败 auth=%s: %v", rec.AuthIndex, err)
+			failed++
 			continue
 		}
 		_ = g.storeMarkActive(rec.AuthIndex)
-		g.logf("info", "xAI 额度重置到达，已自动启用 auth=%s file=%s", rec.AuthIndex, rec.FileName)
-		g.appendAction("recover", "tick", rec.AuthIndex, rec.FileName, rec.Account, 0, rec.Signal, "recover_at reached")
+		if prev {
+			recovered++
+			g.logf("info", "xAI 额度重置到达，已自动启用 auth=%s file=%s", rec.AuthIndex, rec.FileName)
+			g.appendAction("recover", "tick", rec.AuthIndex, rec.FileName, rec.Account, 0, rec.Signal, "recover_at reached")
+		} else {
+			cleared++
+			g.logf("info", "账号已启用(经强制刷新确认)，清除 cooldown auth=%s", rec.AuthIndex)
+			g.appendAction("recover", "tick", rec.AuthIndex, rec.FileName, rec.Account, 0, rec.Signal, "already enabled (fresh)")
+		}
+	}
+
+	// Heal: ownership was cleared (Active) or mis-tagged manual while CPA still disabled.
+	healed = g.healLostPluginCooldowns(now, seen)
+	if recovered+cleared+failed+healed > 0 {
+		g.logf("info", "Tick 恢复汇总 due=%d recovered=%d cleared=%d failed=%d healed=%d",
+			len(due), recovered, cleared, failed, healed)
 	}
 }
 
+// healLostPluginCooldowns restores or re-enables accounts whose plugin_auto marker was lost
+// while CPA still has them disabled (e.g. stale-cache MarkActive in older builds).
+func (g *Guard) healLostPluginCooldowns(now time.Time, seen map[string]struct{}) int {
+	if g.auth == nil {
+		return 0
+	}
+	candidates := g.storeLostCooldownCandidates()
+	if len(candidates) == 0 {
+		return 0
+	}
+	healed := 0
+	nowMS := now.UnixMilli()
+	for _, rec := range candidates {
+		if _, ok := seen[rec.AuthIndex]; ok {
+			continue
+		}
+		seen[rec.AuthIndex] = struct{}{}
+
+		eff := lastCooldownEffectiveRecoverMS(&rec)
+		if eff <= 0 {
+			continue
+		}
+
+		if nowMS < eff {
+			current, err := g.findAuth(rec.AuthIndex)
+			if err != nil || current == nil {
+				if err != nil {
+					g.logf("warn", "heal 查询失败 auth=%s: %v", rec.AuthIndex, err)
+				}
+				continue
+			}
+			if !current.Disabled {
+				continue
+			}
+			restored := AccountRecord{
+				AuthIndex:                rec.AuthIndex,
+				FileName:                 rec.FileName,
+				Provider:                 firstNonEmpty(rec.Provider, "xai"),
+				Account:                  rec.Account,
+				DisableSource:            SourcePluginAuto,
+				State:                    StateAutoDisabled,
+				RecoverAtMS:              rec.LastCooldownRecoverAtMS,
+				DisabledAtMS:             rec.LastCooldownDisabledAtMS,
+				PreDisabled:              false,
+				Owner:                    Owner,
+				Reason:                   firstNonEmpty(rec.LastCooldownReason, rec.Reason, "restored_lost_plugin_auto"),
+				Signal:                   firstNonEmpty(rec.LastCooldownSignal, rec.Signal),
+				LastCooldownSignal:       rec.LastCooldownSignal,
+				LastCooldownReason:       rec.LastCooldownReason,
+				LastCooldownDisabledAtMS: rec.LastCooldownDisabledAtMS,
+				LastCooldownRecoverAtMS:  rec.LastCooldownRecoverAtMS,
+			}
+			if restored.DisabledAtMS <= 0 {
+				restored.DisabledAtMS = nowMS
+			}
+			if restored.RecoverAtMS <= 0 {
+				restored.RecoverAtMS = eff
+			}
+			if err := g.storeUpsert(restored); err != nil {
+				g.logf("error", "heal 写回 plugin_auto 失败 auth=%s: %v", rec.AuthIndex, err)
+				continue
+			}
+			healed++
+			g.logf("info", "已修复丢失的 plugin_auto 冷却标记 auth=%s recover_at_ms=%d", rec.AuthIndex, restored.RecoverAtMS)
+			g.appendAction("heal_cooldown", "tick", rec.AuthIndex, restored.FileName, restored.Account, 0, restored.Signal, "restored lost plugin_auto ownership")
+			continue
+		}
+
+		prev, err := g.auth.SetDisabled(rec.AuthIndex, false)
+		if err != nil {
+			if strings.Contains(err.Error(), "auth file not found") {
+				_ = g.storeRemove(rec.AuthIndex)
+				continue
+			}
+			g.logf("error", "heal 自动启用失败 auth=%s: %v", rec.AuthIndex, err)
+			continue
+		}
+		_ = g.storeMarkActive(rec.AuthIndex)
+		if !prev {
+			continue
+		}
+		healed++
+		g.logf("info", "heal 恢复已到期丢失标记号 auth=%s file=%s", rec.AuthIndex, rec.FileName)
+		g.appendAction("recover", "tick", rec.AuthIndex, rec.FileName, rec.Account, 0,
+			firstNonEmpty(rec.LastCooldownSignal, rec.Signal), "heal orphan cooldown (recover due)")
+	}
+	return healed
+}
 
 func (g *Guard) deleteForDeadCredential(authIndex string, ev UsageEvent) {
 	if g.auth == nil {
@@ -920,6 +1071,34 @@ func (g *Guard) storeDue(now time.Time) []AccountRecord {
 		return nil
 	}
 	return store.DueAutoDisabled(now)
+}
+
+func (g *Guard) storeLostCooldownCandidates() []AccountRecord {
+	g.mu.Lock()
+	store := g.store
+	g.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+	return store.LostPluginCooldownCandidates()
+}
+
+// lastCooldownEffectiveRecoverMS uses last_cooldown_* fingerprint when live recover fields were cleared.
+func lastCooldownEffectiveRecoverMS(rec *AccountRecord) int64 {
+	if rec == nil {
+		return 0
+	}
+	tmp := &AccountRecord{
+		DisabledAtMS: rec.LastCooldownDisabledAtMS,
+		RecoverAtMS:  rec.LastCooldownRecoverAtMS,
+	}
+	if tmp.DisabledAtMS <= 0 {
+		tmp.DisabledAtMS = rec.DisabledAtMS
+	}
+	if tmp.RecoverAtMS <= 0 {
+		tmp.RecoverAtMS = rec.RecoverAtMS
+	}
+	return EffectiveRecoverAtMS(tmp)
 }
 
 func (g *Guard) logf(level, format string, args ...any) {

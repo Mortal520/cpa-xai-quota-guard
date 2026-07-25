@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.29
+
+### 修复 plugin_auto 冷却到期未自动启用
+- **根因**：auth-files 短缓存/粘性缓存把仍禁用的号显示为已启用；Tick 误走「外部已启用 → MarkActive」且不调用 SetDisabled，冷却所有权被清掉后永久卡在 CPA 禁用
+- **SetDisabled/Delete**：强制 `listAuthFiles(true)` 绕过 TTL/粘性缓存；鉴权熔断时禁止用脏缓存做启用/禁用
+- **Tick**：到期号一律 `SetDisabled(false)`，不再用 List 的 Disabled 短路
+- **补偿**：识别 `last_cooldown_*` 指纹丢失所有权的孤儿号——未到期写回 plugin_auto，已到期强制启用
+- **被动路径**：已禁用但带插件冷却指纹时夺回 plugin_auto，避免误标 user_manual
+
+
 ## 0.3.28
 
 ### 修复 CPAMP 打开导致 CPA 封 IP

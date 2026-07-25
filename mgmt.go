@@ -199,12 +199,24 @@ func copyAuthFiles(in []xaiquota.AuthFile) []xaiquota.AuthFile {
 	return out
 }
 
+// List returns auth-files. May serve a short TTL cache or sticky stale snapshot for UI.
+// Mutations (SetDisabled/Delete) MUST use listAuthFiles(true) instead.
 func (m *mgmtAuth) List() ([]xaiquota.AuthFile, error) {
+	return m.listAuthFiles(false)
+}
+
+// listAuthFiles loads CPA inventory.
+// forceFresh=true bypasses TTL cache and refuses sticky/circuit stale data (required for enable/disable).
+func (m *mgmtAuth) listAuthFiles(forceFresh bool) ([]xaiquota.AuthFile, error) {
 	if m == nil || m.url == "" || m.key == "" {
 		return nil, fmt.Errorf("management not configured")
 	}
 	if open, left, last := mgmtAuthCircuitOpen(); open {
-		// Prefer sticky cache over hammering CPA with bad key.
+		if forceFresh {
+			// Never mutate or decide recovery from sticky cache while circuit is open.
+			return nil, fmt.Errorf("management auth circuit open for %s (stop hammering CPA to avoid IP ban): %s", left.Round(time.Second), last)
+		}
+		// Prefer sticky cache over hammering CPA with bad key (UI/metrics only).
 		authListCacheMu.Lock()
 		stale := copyAuthFiles(authListCacheData)
 		authListLastErr = fmt.Sprintf("auth circuit open %s: %s", left.Round(time.Second), last)
@@ -216,32 +228,59 @@ func (m *mgmtAuth) List() ([]xaiquota.AuthFile, error) {
 		return nil, fmt.Errorf("management auth circuit open for %s (stop hammering CPA to avoid IP ban): %s", left.Round(time.Second), last)
 	}
 	cacheKey := m.url + "|" + m.key
-	authListCacheMu.Lock()
-	if len(authListCacheData) > 0 && authListCacheKey == cacheKey && time.Since(authListCacheAt) < authListCacheTTL {
-		out := copyAuthFiles(authListCacheData)
-		authListLastStale = false
-		authListLastErr = ""
-		authListCacheMu.Unlock()
-		return out, nil
-	}
-	// keep a sticky snapshot for failure fallback (may be older than TTL)
-	staleSnap := copyAuthFiles(authListCacheData)
-	staleKey := authListCacheKey
-	staleAt := authListCacheAt
-	authListCacheMu.Unlock()
-
-	body, err := mgmtHTTP(http.MethodGet, m.url+"/v0/management/auth-files", nil, m.key)
-	if err != nil {
-		if isMgmtAuthHTTPError(err) {
-			noteMgmtAuthFailure(err.Error())
+	if !forceFresh {
+		authListCacheMu.Lock()
+		if len(authListCacheData) > 0 && authListCacheKey == cacheKey && time.Since(authListCacheAt) < authListCacheTTL {
+			out := copyAuthFiles(authListCacheData)
+			authListLastStale = false
+			authListLastErr = ""
+			authListCacheMu.Unlock()
+			return out, nil
 		}
-		// sticky fallback: never force zero inventory into UI/metrics on transient errors
-		if len(staleSnap) > 0 && staleKey == cacheKey && !staleAt.IsZero() && time.Since(staleAt) < authListStaleMax {
+		// keep a sticky snapshot for failure fallback (may be older than TTL)
+		staleSnap := copyAuthFiles(authListCacheData)
+		staleKey := authListCacheKey
+		staleAt := authListCacheAt
+		authListCacheMu.Unlock()
+
+		body, err := mgmtHTTP(http.MethodGet, m.url+"/v0/management/auth-files", nil, m.key)
+		if err != nil {
+			if isMgmtAuthHTTPError(err) {
+				noteMgmtAuthFailure(err.Error())
+			}
+			// sticky fallback: never force zero inventory into UI/metrics on transient errors
+			if len(staleSnap) > 0 && staleKey == cacheKey && !staleAt.IsZero() && time.Since(staleAt) < authListStaleMax {
+				authListCacheMu.Lock()
+				authListLastErr = err.Error()
+				authListLastStale = true
+				authListCacheMu.Unlock()
+				return staleSnap, nil
+			}
 			authListCacheMu.Lock()
 			authListLastErr = err.Error()
 			authListLastStale = true
 			authListCacheMu.Unlock()
-			return staleSnap, nil
+			return nil, err
+		}
+		out, decErr := decodeAuthFilesBody(body)
+		if decErr != nil {
+			if len(staleSnap) > 0 && staleKey == cacheKey && !staleAt.IsZero() && time.Since(staleAt) < authListStaleMax {
+				authListCacheMu.Lock()
+				authListLastErr = "decode: " + decErr.Error()
+				authListLastStale = true
+				authListCacheMu.Unlock()
+				return staleSnap, nil
+			}
+			return nil, decErr
+		}
+		return m.storeAuthListCache(cacheKey, out), nil
+	}
+
+	// forceFresh: always hit CPA; no sticky fallback (stale Disabled flags break recovery).
+	body, err := mgmtHTTP(http.MethodGet, m.url+"/v0/management/auth-files", nil, m.key)
+	if err != nil {
+		if isMgmtAuthHTTPError(err) {
+			noteMgmtAuthFailure(err.Error())
 		}
 		authListCacheMu.Lock()
 		authListLastErr = err.Error()
@@ -249,17 +288,18 @@ func (m *mgmtAuth) List() ([]xaiquota.AuthFile, error) {
 		authListCacheMu.Unlock()
 		return nil, err
 	}
+	out, decErr := decodeAuthFilesBody(body)
+	if decErr != nil {
+		return nil, decErr
+	}
+	return m.storeAuthListCache(cacheKey, out), nil
+}
+
+func decodeAuthFilesBody(body []byte) ([]xaiquota.AuthFile, error) {
 	var resp struct {
 		Files []mgmtAuthEntry `json:"files"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		if len(staleSnap) > 0 && staleKey == cacheKey && !staleAt.IsZero() && time.Since(staleAt) < authListStaleMax {
-			authListCacheMu.Lock()
-			authListLastErr = "decode: " + err.Error()
-			authListLastStale = true
-			authListCacheMu.Unlock()
-			return staleSnap, nil
-		}
 		return nil, fmt.Errorf("decode auth-files: %w", err)
 	}
 	out := make([]xaiquota.AuthFile, 0, len(resp.Files))
@@ -287,10 +327,12 @@ func (m *mgmtAuth) List() ([]xaiquota.AuthFile, error) {
 			AccountType: at,
 		})
 	}
+	return out, nil
+}
+
+func (m *mgmtAuth) storeAuthListCache(cacheKey string, out []xaiquota.AuthFile) []xaiquota.AuthFile {
 	// Sticky guard removed: a successful empty response from CPA means
 	// all credentials were deleted (e.g. after patrol sweep). Accept as real.
-	// Sticky protection only applies to network/decode errors above, not to
-	// a valid HTTP 200 with zero files.
 	xt, xe, xd := recountXAI(out)
 	authListCacheMu.Lock()
 	authListCacheAt = time.Now()
@@ -303,7 +345,7 @@ func (m *mgmtAuth) List() ([]xaiquota.AuthFile, error) {
 	authListLastDis = xd
 	authListCacheMu.Unlock()
 	clearMgmtAuthCircuit()
-	return out, nil
+	return out
 }
 
 // invalidateAuthListCache drops cached inventory and all derived metrics after mutate ops.
@@ -324,7 +366,9 @@ func (m *mgmtAuth) SetDisabled(authIndex string, disabled bool) (bool, error) {
 	if m == nil || m.url == "" || m.key == "" {
 		return false, fmt.Errorf("management not configured")
 	}
-	files, err := m.List()
+	// Force fresh inventory: TTL/sticky cache can report Disabled=false while CPA still
+	// has the file disabled, which used to skip PATCH and let Tick clear plugin_auto ownership.
+	files, err := m.listAuthFiles(true)
 	if err != nil {
 		return false, err
 	}
@@ -347,6 +391,9 @@ func (m *mgmtAuth) SetDisabled(authIndex string, disabled bool) (bool, error) {
 	}
 	payload, _ := json.Marshal(map[string]any{"name": name, "disabled": disabled})
 	if _, err := mgmtHTTP(http.MethodPatch, m.url+"/v0/management/auth-files/status", payload, m.key); err != nil {
+		if isMgmtAuthHTTPError(err) {
+			noteMgmtAuthFailure(err.Error())
+		}
 		return prev, err
 	}
 	invalidateAuthListCache()
@@ -358,7 +405,7 @@ func (m *mgmtAuth) Delete(authIndex string) error {
 	if m == nil || m.url == "" || m.key == "" {
 		return fmt.Errorf("management not configured")
 	}
-	files, err := m.List()
+	files, err := m.listAuthFiles(true)
 	if err != nil {
 		return err
 	}
