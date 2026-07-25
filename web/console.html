@@ -529,6 +529,53 @@ function resumePluginAccess(){
   ACCESS_STOP_REASON = "";
   hideAccessStoppedBanner();
 }
+function clearMgmtKey(){
+  try { localStorage.removeItem(KEY_LS); } catch(e){}
+  try { sessionStorage.removeItem(KEY_LS); } catch(e){}
+  var inp = document.getElementById("cfgKey");
+  if(inp) inp.value = "";
+  KEY_SOURCE = "manual";
+}
+/** After IP/host change or wrong browser key: drop stale local key, re-read CPA panel, re-bind. */
+async function recoverAccessAfterKeyStop(){
+  clearMgmtKey();
+  resumePluginAccess();
+  var fill = {filled:false, source:"manual"};
+  try { fill = tryAutoFillManagementKey() || fill; } catch(e){}
+  var k = mgmtKey();
+  var inp = document.getElementById("cfgKey");
+  if(inp && k) inp.value = k;
+  try { syncKeyUIHint(); } catch(e){}
+  if(!k){
+    if(isLikelyCPAMPHost()){
+      showCpampKeySetupHint();
+      showKeyNeeded();
+      alert("已清除本插件本地错误 Key。当前从 CPAMP 打开，请手动填写 CPA(:8317) Management Key 后点「保存并同步进程」。");
+      return;
+    }
+    showKeyNeeded();
+    alert("已清除本地错误 Key，但未从 CPA 面板读到新 Key。请登录 CPA /management.html 并勾选记住密码，或手动填写后保存。");
+    return;
+  }
+  try{
+    var r = await api("bind-key", {method:"POST", body:{key:k, persist:true}, timeout_ms:15000, force_key_retry:true});
+    var res = r && (r.result || r);
+    if(!r || r.ok === false || (res && res.ok === false)){
+      var em = (res && res.error) || (r && r.error) || "Key 校验失败";
+      if(typeof em !== "string") em = JSON.stringify(em);
+      // Keep access open so user can edit key; only stop on hard reject after explicit save.
+      alert("自动重试仍失败:\n" + em + "\n请确认 Key 是 CPA 的，不是 CPAMP 密码；保存成功后会恢复轮询。");
+      showKeyNeeded();
+      return;
+    }
+    resumePluginAccess();
+    await loadState({force:true});
+    scheduleStatePoll();
+    alert("已用新 Key 恢复访问" + (res && res.persisted ? "（已写入进程）" : "（进程内存有效）"));
+  }catch(e){
+    alert("恢复异常: " + (e && e.message ? e.message : e));
+  }
+}
 function escEarly(s){ s=String(s==null?"":s); return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 function showAccessStoppedBanner(msg){
 
@@ -544,7 +591,10 @@ function showAccessStoppedBanner(msg){
   }
   el.style.display = "block";
   el.innerHTML = "<b>已停止访问 CPA</b>：避免错误密钥连续请求导致 8317 封 IP。<br>"+
-    escEarly(String(msg||""))+"<br>请检查并重新填写 <b>CPA</b> 的 Management Key（不要填 CPAMP 密码），然后点「保存并同步进程」。";
+    escEarly(String(msg||""))+"<br>"+
+    "常见原因：① 本地保存的是旧/错误 Key ② 从 CPAMP 打开却填了 CPAMP 密码 ③ 换了访问入口后浏览器仍用旧 Key。<br>"+
+    "请填写 <b>CPA</b> 的 Management Key（与 yaml/management password 同一把，不是 CPAMP 密码），点「保存并同步进程」；"+
+    "或点 <button type=\"button\" class=\"primary\" style=\"margin-left:.35rem\" onclick=\"recoverAccessAfterKeyStop()\">清除错误Key并重试</button>";
 }
 function hideAccessStoppedBanner(){
   var el = document.getElementById("accessStopBanner");
@@ -553,7 +603,7 @@ function hideAccessStoppedBanner(){
 function showCpampKeySetupHint(){
   var hint = document.getElementById("cfgKeyHint");
   var meta = document.getElementById("cfgMeta");
-  var msg = "当前从 CPAMP 打开：不会自动读取面板密码。请手动填写 CPA(:8317) 的 Management Key 并保存；之后使用本插件已保存的 Key。";
+  var msg = "当前从 CPAMP 打开：不会自动读取面板密码。请手动填写 CPA 的 Management Key（与 CPA yaml/management password 同一把；进程默认连 127.0.0.1:8317，换访问入口 IP 不影响进程侧）。若换过入口后提示 401，点「清除错误Key并重试」或重新保存。";
   if(hint) hint.innerHTML = '<span class="err">'+msg+'</span>';
   if(meta) meta.textContent = msg;
 }

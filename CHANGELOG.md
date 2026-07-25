@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.31
+
+### 换入口 IP / 错误本地 Key 后可恢复
+- **现象**：从 CPAMP 打开插件提示「已停止访问 CPA / invalid management key (http 401)」；进程侧 yaml Key 与 127.0.0.1:8317 仍正常
+- **原因**：浏览器 localStorage 里旧 Key（或误存的 CPAMP 密码）被带上 X-Management-Key；换内网入口后 origin 变了，面板 Key 也可能对不上
+- **处理**：停止横幅增加「清除错误Key并重试」——清插件本地 Key、在 CPA 主机重读面板、bind-key 校验后恢复轮询；CPAMP 主机仍要求手填 CPA Key
+- 说明：进程默认 `management_url=http://127.0.0.1:8317`，**换访问入口 IP 不需要改进程 URL**
+
+
 ## 0.3.30
 
 ### 单号日额度动态跟随官方 limit
