@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.30
+
+### 单号日额度动态跟随官方 limit
+- **问题**：未观测账号回退写死 1M；成功请求的 X-Ratelimit-Limit-Tokens 未入库，官方调额后日额度池仍按 1M 估算
+- **逐号观测**：每次 xAI usage（成功/失败）解析 free-usage 报文体 actual/limit，否则解析响应头 X-Ratelimit-Limit-Tokens + Remaining-Tokens 写入 QuotaByAuth
+- **日额度池**：启用号实测 limit 合计 + 未观测启用数 x 快照众数（众数随官方调额变化）；EnsureUsageStats 不再把默认上限强制刷回 1M
+- **合并策略**：同 limit 下，新鲜 free-usage 正文 actual 不被更低的 header 推算覆盖
+- UI：日额度池副文案标明动态单号上限
+
+
 ## 0.3.29
 
 ### 修复 plugin_auto 冷却到期未自动启用

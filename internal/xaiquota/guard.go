@@ -794,6 +794,27 @@ func (g *Guard) recordUsageMetrics(ev UsageEvent) {
 	if g.store != nil {
 		_ = g.store.AddUsageEvent(ev.AuthIndex, tokens, ev.Failed, time.Now())
 	}
+	// Dynamic per-account daily/rolling limit: free-usage body + rate-limit headers on every event.
+	g.observeQuotaFromEvent(ev)
+}
+
+// observeQuotaFromEvent updates QuotaByAuth from the richest signal available on this event.
+// Prefer free-usage body actual/limit; else X-Ratelimit-Limit/Remaining-Tokens on success or error.
+func (g *Guard) observeQuotaFromEvent(ev UsageEvent) {
+	authIndex := trim(ev.AuthIndex)
+	if authIndex == "" || g.store == nil {
+		return
+	}
+	now := time.Now()
+	if actual, limit, ok := ParseFreeUsageTokens(ev.Body); ok {
+		_ = g.store.ObserveFreeQuotaSource(authIndex, actual, limit, now, QuotaSourceFreeUsageBody)
+		return
+	}
+	h := headerFromMap(ev.ResponseHeaders)
+	if limit, remaining, ok := ParseRateLimitTokenHeaders(h); ok {
+		actual := ActualFromLimitRemaining(limit, remaining)
+		_ = g.store.ObserveFreeQuotaSource(authIndex, actual, limit, now, QuotaSourceRateLimitHdr)
+	}
 }
 
 func (g *Guard) ObserveQuota(authIndex string, actual, limit int64) {
@@ -804,7 +825,7 @@ func (g *Guard) storeObserveQuota(authIndex string, actual, limit int64) error {
 	if g.store == nil {
 		return nil
 	}
-	return g.store.ObserveFreeQuota(authIndex, actual, limit, time.Now())
+	return g.store.ObserveFreeQuotaSource(authIndex, actual, limit, time.Now(), QuotaSourceFreeUsageBody)
 }
 
 func (g *Guard) Metrics() MetricsView {

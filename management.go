@@ -542,6 +542,7 @@ func stateResponse(req managementRequest) ([]byte, error) {
 		if q := quotaByAuth[k]; q != nil {
 			item["rolling_actual"] = q.Actual
 			item["rolling_limit"] = q.Limit
+			item["rolling_source"] = q.Source
 			item["rolling_updated_at_ms"] = q.UpdatedAtMS
 			item["rolling_over"] = q.Limit > 0 && q.Actual > q.Limit
 			if q.Limit > 0 && q.Actual > q.Limit {

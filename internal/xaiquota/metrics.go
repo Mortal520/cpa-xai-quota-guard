@@ -1,15 +1,23 @@
 package xaiquota
 
 import (
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// DefaultFreeLimit is the fallback free-tier rolling window token limit per account.
-// Prefer InferFreeLimitPerAccount from live free-usage snapshots (often 1M; previously 2M).
+// DefaultFreeLimit is the LAST-RESORT fallback when no per-account snapshot exists yet.
+// Live limits come from free-usage bodies and X-Ratelimit-*-Tokens headers (dynamic).
 const DefaultFreeLimit int64 = 1_000_000
+
+// Quota snapshot sources.
+const (
+	QuotaSourceFreeUsageBody = "free-usage-body"
+	QuotaSourceFreeUsage     = "free-usage-exhausted" // legacy label
+	QuotaSourceRateLimitHdr  = "ratelimit-headers"
+)
 
 // ZeroTokenAlertThreshold consecutive successful xAI events with empty Detail.
 const ZeroTokenAlertThreshold int64 = 5
@@ -118,6 +126,9 @@ func ParseFreeUsageTokens(body string) (actual, limit int64, ok bool) {
 	}
 	m := reTokensActualLimit.FindStringSubmatch(body)
 	if len(m) != 3 {
+		m = reTokensActualLimitLoose.FindStringSubmatch(body)
+	}
+	if len(m) != 3 {
 		return 0, 0, false
 	}
 	a, err1 := parseFlexibleInt(m[1])
@@ -127,6 +138,95 @@ func ParseFreeUsageTokens(body string) (actual, limit int64, ok bool) {
 	}
 	return a, l, true
 }
+
+// reTokensActualLimitLoose catches minor wording drift around actual/limit pairs.
+var reTokensActualLimitLoose = regexp.MustCompile(`(?i)(?:actual\s*/\s*limit|tokens)\s*[:=]?\s*([0-9][0-9_,\.]*)\s*/\s*([0-9][0-9_,\.]*)`)
+
+// ParseRateLimitTokenHeaders reads xAI rate-limit token headers.
+// remaining is -1 when the remaining header is absent.
+func ParseRateLimitTokenHeaders(h http.Header) (limit, remaining int64, ok bool) {
+	if h == nil {
+		return 0, -1, false
+	}
+	limit = firstHeaderInt64(h,
+		"X-Ratelimit-Limit-Tokens",
+		"X-RateLimit-Limit-Tokens",
+		"x-ratelimit-limit-tokens",
+		"Ratelimit-Limit-Tokens",
+	)
+	if limit <= 0 {
+		return 0, -1, false
+	}
+	remaining = -1
+	remRaw := firstHeaderRaw(h,
+		"X-Ratelimit-Remaining-Tokens",
+		"X-RateLimit-Remaining-Tokens",
+		"x-ratelimit-remaining-tokens",
+		"Ratelimit-Remaining-Tokens",
+	)
+	if remRaw != "" {
+		if n, err := parseFlexibleInt(remRaw); err == nil {
+			remaining = n
+		}
+	}
+	return limit, remaining, true
+}
+
+func firstHeaderRaw(h http.Header, keys ...string) string {
+	if h == nil {
+		return ""
+	}
+	for _, k := range keys {
+		if v := strings.TrimSpace(h.Get(k)); v != "" {
+			return v
+		}
+		if vv := h[k]; len(vv) > 0 {
+			if v := strings.TrimSpace(vv[0]); v != "" {
+				return v
+			}
+		}
+	}
+	want := map[string]struct{}{}
+	for _, k := range keys {
+		want[strings.ToLower(k)] = struct{}{}
+	}
+	for k, vv := range h {
+		if _, hit := want[strings.ToLower(k)]; !hit {
+			continue
+		}
+		if len(vv) == 0 {
+			continue
+		}
+		if v := strings.TrimSpace(vv[0]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstHeaderInt64(h http.Header, keys ...string) int64 {
+	raw := firstHeaderRaw(h, keys...)
+	if raw == "" {
+		return 0
+	}
+	n, err := parseFlexibleInt(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// ActualFromLimitRemaining maps limit/remaining headers into used tokens.
+func ActualFromLimitRemaining(limit, remaining int64) int64 {
+	if limit <= 0 || remaining < 0 {
+		return 0
+	}
+	if remaining > limit {
+		return 0
+	}
+	return limit - remaining
+}
+
 
 func parseFlexibleInt(s string) (int64, error) {
 	s = strings.TrimSpace(s)
@@ -158,8 +258,10 @@ func EnsureUsageStats(s *UsageStats) *UsageStats {
 	if s.UsageByAuth == nil {
 		s.UsageByAuth = map[string]*AccountUsageSnapshot{}
 	}
-	// Always align with product constant so upgrades (1M→2M) apply to existing state files.
-	s.DefaultLimitPerAcct = DefaultFreeLimit
+	// Seed fallback only; do not clobber an inferred dynamic default.
+	if s.DefaultLimitPerAcct <= 0 {
+		s.DefaultLimitPerAcct = DefaultFreeLimit
+	}
 	if s.DayKey == "" {
 		s.DayKey = DayKeyShanghai(time.Now())
 	}
@@ -325,6 +427,13 @@ func (s *Store) SyncAuthCounters(successSum, failedSum, estimatePerSuccess int64
 }
 
 func (s *Store) ObserveFreeQuota(authIndex string, actual, limit int64, at time.Time) error {
+	return s.ObserveFreeQuotaSource(authIndex, actual, limit, at, QuotaSourceFreeUsage)
+}
+
+// ObserveFreeQuotaSource stores a per-account rolling free-usage snapshot.
+// source should be QuotaSourceFreeUsageBody / QuotaSourceRateLimitHdr / etc.
+// Snapshot only — never mutates calendar UsedToday/UsedTotal.
+func (s *Store) ObserveFreeQuotaSource(authIndex string, actual, limit int64, at time.Time, source string) error {
 	authIndex = strings.TrimSpace(authIndex)
 	if authIndex == "" || limit <= 0 {
 		return nil
@@ -332,8 +441,9 @@ func (s *Store) ObserveFreeQuota(authIndex string, actual, limit int64, at time.
 	if actual < 0 {
 		actual = 0
 	}
-	// Snapshot only. Free-usage actual/limit is a rolling window probe — do NOT add
-	// deltas into calendar UsedToday/UsedTotal (those come only from usage.handle tokens).
+	if source == "" {
+		source = QuotaSourceFreeUsage
+	}
 	return s.mutateUsage(func(st *UsageStats) {
 		day := DayKeyShanghai(at)
 		if st.DayKey != day {
@@ -343,13 +453,25 @@ func (s *Store) ObserveFreeQuota(authIndex string, actual, limit int64, at time.
 			st.EstimatedToday = 0
 			st.ZeroTokenSuccessToday = 0
 		}
+		prev := st.QuotaByAuth[authIndex]
+		// Header-only updates must not erase a fresher free-usage body actual on the same limit
+		// unless remaining-based actual is higher (more of the window consumed).
+		if prev != nil && source == QuotaSourceRateLimitHdr &&
+			(prev.Source == QuotaSourceFreeUsageBody || prev.Source == QuotaSourceFreeUsage) &&
+			prev.Limit == limit && actual < prev.Actual &&
+			at.UnixMilli()-prev.UpdatedAtMS < int64(6*time.Hour/time.Millisecond) {
+			actual = prev.Actual
+			source = prev.Source
+		}
 		st.QuotaByAuth[authIndex] = &AccountQuotaSnapshot{
 			AuthIndex:   authIndex,
 			Actual:      actual,
 			Limit:       limit,
 			UpdatedAtMS: at.UnixMilli(),
-			Source:      "free-usage-exhausted",
+			Source:      source,
 		}
+		// Keep durable default in sync with modal snapshot limit (dynamic official cap).
+		st.DefaultLimitPerAcct = InferFreeLimitPerAccount(*st, nil, nil)
 		st.LastEventAtMS = at.UnixMilli()
 	})
 }
@@ -362,8 +484,8 @@ func BuildMetricsView(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats) Metr
 }
 
 // InferFreeLimitPerAccount returns the modal free-usage limit from snapshots
-// (filtered by enabledAuth, else liveAuth, else all). Fallback: DefaultFreeLimit.
-// Grok free tier currently reports limit≈1M in free-usage-exhausted bodies.
+// (filtered by enabledAuth, else liveAuth, else all). Fallback: DefaultFreeLimit
+// only when no positive snapshot limit has been observed yet.
 func InferFreeLimitPerAccount(st UsageStats, liveAuth, enabledAuth map[string]bool) int64 {
 	st = *EnsureUsageStats(&st)
 	freq := map[int64]int{}
@@ -465,7 +587,7 @@ func BuildMetricsViewOpts(xaiTotal, xaiEnabled, xaiDisabled int, st UsageStats, 
 		alertMsg = "连续成功请求缺少 usage Detail token，可能 CPA 未发布用量明细；日历今日累计可能偏低。"
 	}
 
-	note := "仅xAI；日额度池=启用号 free-usage limit 合计(缺快照用众数单号上限)；日历今日/累计=usage.handle；滚动池=启用快照(actual≤limit)；禁用不计入。"
+	note := "仅xAI；日额度池=各启用号实测 limit 合计(来自 free-usage 报文体或 X-Ratelimit-Limit-Tokens；缺快照用众数)；日历今日/累计=usage.handle；滚动池=启用快照(actual≤limit)；禁用不计入。"
 	return MetricsView{
 		XAITotal:              xaiTotal,
 		XAIEnabled:            xaiEnabled,

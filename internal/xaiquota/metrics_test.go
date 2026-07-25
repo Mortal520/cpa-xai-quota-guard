@@ -1,6 +1,7 @@
 package xaiquota
 
 import (
+	"net/http"
 	"testing"
 	"time"
 )
@@ -269,6 +270,80 @@ func TestInferFreeLimitFromSnapshots(t *testing.T) {
 	}
 	if v.RollingLimitKnown != 4_000_000 {
 		t.Fatalf("rolling limit known=%d want 4M", v.RollingLimitKnown)
+	}
+}
+
+func TestParseRateLimitTokenHeaders(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-Ratelimit-Limit-Tokens", "2000000")
+	h.Set("X-Ratelimit-Remaining-Tokens", "1500000")
+	lim, rem, ok := ParseRateLimitTokenHeaders(h)
+	if !ok || lim != 2_000_000 || rem != 1_500_000 {
+		t.Fatalf("got ok=%v lim=%d rem=%d", ok, lim, rem)
+	}
+	if ActualFromLimitRemaining(lim, rem) != 500_000 {
+		t.Fatalf("actual=%d", ActualFromLimitRemaining(lim, rem))
+	}
+}
+
+func TestInferFreeLimitTracksOfficialCapChange(t *testing.T) {
+	st := UsageStats{
+		QuotaByAuth: map[string]*AccountQuotaSnapshot{
+			"a1": {AuthIndex: "a1", Actual: 100, Limit: 2_000_000, Source: QuotaSourceRateLimitHdr},
+			"a2": {AuthIndex: "a2", Actual: 200, Limit: 2_000_000, Source: QuotaSourceRateLimitHdr},
+			"a3": {AuthIndex: "a3", Actual: 50, Limit: 1_000_000, Source: QuotaSourceFreeUsageBody},
+		},
+	}
+	got := InferFreeLimitPerAccount(st, nil, map[string]bool{"a1": true, "a2": true, "a3": true})
+	if got != 2_000_000 {
+		t.Fatalf("modal limit=%d want 2M after official raise", got)
+	}
+	v := BuildMetricsViewOpts(3, 3, 0, st, true, map[string]bool{"a1": true, "a2": true, "a3": true}, map[string]bool{"a1": true, "a2": true, "a3": true})
+	if v.QuotaTotalEst != 5_000_000 {
+		t.Fatalf("daily pool=%d want 5M (2+2+1)", v.QuotaTotalEst)
+	}
+	if v.DefaultLimitPerAcct != 2_000_000 {
+		t.Fatalf("default_limit_per_acct=%d want 2M", v.DefaultLimitPerAcct)
+	}
+}
+
+func TestObserveFreeQuotaSourceUpdatesDefault(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir + "/st.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := s.ObserveFreeQuotaSource("a1", 10, 2_000_000, now, QuotaSourceRateLimitHdr); err != nil {
+		t.Fatal(err)
+	}
+	st := s.GetUsageStats()
+	if st.QuotaByAuth["a1"] == nil || st.QuotaByAuth["a1"].Limit != 2_000_000 {
+		t.Fatalf("snap=%+v", st.QuotaByAuth["a1"])
+	}
+	if st.DefaultLimitPerAcct != 2_000_000 {
+		t.Fatalf("default=%d want 2M dynamic", st.DefaultLimitPerAcct)
+	}
+	// EnsureUsageStats must not reset dynamic default back to 1M constant.
+	st2 := EnsureUsageStats(&st)
+	if st2.DefaultLimitPerAcct != 2_000_000 {
+		t.Fatalf("EnsureUsageStats clobbered default to %d", st2.DefaultLimitPerAcct)
+	}
+}
+
+func TestObserveHeaderDoesNotDowngradeFreshBodyActual(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir + "/st.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	_ = s.ObserveFreeQuotaSource("a1", 900_000, 1_000_000, now, QuotaSourceFreeUsageBody)
+	_ = s.ObserveFreeQuotaSource("a1", 100_000, 1_000_000, now.Add(time.Minute), QuotaSourceRateLimitHdr)
+	st := s.GetUsageStats()
+	q := st.QuotaByAuth["a1"]
+	if q == nil || q.Actual != 900_000 {
+		t.Fatalf("header must not downgrade fresh body actual: %+v", q)
 	}
 }
 

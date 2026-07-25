@@ -304,9 +304,9 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
       <div class="stats-group">
         <h3>额度（仅 xAI）</h3>
         <div class="stats">
-          <div class="stat accent"><span class="lbl">日额度池(估)</span><b id="sQuotaTotal">0</b><div class="sub" id="sQuotaKnown">启用×快照limit · 24h滚动</div></div>
+          <div class="stat accent"><span class="lbl">日额度池(估)</span><b id="sQuotaTotal">0</b><div class="sub" id="sQuotaKnown">逐号实测limit合计 · 24h滚动</div></div>
           <div class="stat accent"><span class="lbl">已用 · 日历今日</span><b id="sUsedToday">0</b><div class="sub" id="sDayKey">usage 事件累计 · 非滚动快照</div></div>
-          <div class="stat accent"><span class="lbl">滚动快照 used/limit</span><b id="sRolling">0</b><div class="sub" id="sRollingSub">仅启用号 free-usage · actual≤limit</div></div>
+          <div class="stat accent"><span class="lbl">滚动快照 used/limit</span><b id="sRolling">0</b><div class="sub" id="sRollingSub">启用号实测(报文体/响应头) · actual≤limit</div></div>
           <div class="stat accent"><span class="lbl">已用 · 累计(插件)</span><b id="sUsedTotal">0</b><div class="sub" id="sUsedNote">插件生命周期 usage 累计 · 非官方账单</div>
             <div class="bar" title="已用/总额度"><i id="sUsedBar"></i></div>
           </div>
@@ -1268,10 +1268,11 @@ function paintStatusBar(d){
   const qk = document.getElementById("sQuotaKnown");
   if(qk){
     const known=m.quota_known_accounts||0, total=xaiN, rest=m.unobserved_accounts!=null?m.unobserved_accounts:Math.max(0,total-known);
-    const defL = m.default_limit_per_acct || 1000000;
+    const defL = m.default_limit_per_acct || m.inferred_limit_per_acct || 0;
     const en = m.xai_enabled||0;
     const mode = m.include_unobserved_est ? ("已知limit+未观测×"+fmtToken(defL)) : "仅启用快照 limit 合计";
-    qk.textContent = mode + " · 启用 " + en + " · 快照 " + known + " · 未观测≈" + rest + " · 单号上限 " + fmtToken(defL);
+    const limNote = defL>0 ? (" · 动态单号上限 "+fmtToken(defL)) : " · 单号上限待观测";
+    qk.textContent = mode + " · 启用 " + en + " · 快照 " + known + " · 未观测≈" + rest + limNote;
   }
   setToken("sUsedToday", (m.used_today_display != null ? m.used_today_display : (m.used_today||0)));
   const roll = document.getElementById("sRolling");
