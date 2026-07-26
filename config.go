@@ -27,11 +27,13 @@ func configFields() []pluginapi.ConfigField {
 		{Name: "state_path", Type: pluginapi.ConfigFieldTypeString, Description: "状态持久化 JSON 路径"},
 		{Name: "min_reset_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "最小冷却等待(秒)，0=不限制"},
 		{Name: "include_unobserved_quota_est", Type: pluginapi.ConfigFieldTypeBoolean, Description: "总额度是否计入未观测账号×快照推断单号上限（默认开；关则仅已知 rolling limit）"},
+		{Name: "quota_usage_cooldown_ratio", Type: pluginapi.ConfigFieldTypeNumber, Description: "实测 actual/limit 达到该比例后软冷却24h（0=关闭；0.9=90%；允许大于1）"},
 		{Name: "cpamp_url", Type: pluginapi.ConfigFieldTypeString, Description: "CPAMP 基址(可选，用于回补/深链)"},
 		{Name: "cpamp_admin_key", Type: pluginapi.ConfigFieldTypeString, Description: "CPAMP Panel Admin Key(敏感)"},
 		{Name: "webhook_url", Type: pluginapi.ConfigFieldTypeString, Description: "冷却/删除事件 Webhook URL(可选)"},
 		{Name: "patrol_enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "启用定时巡查(默认关闭)"},
 		{Name: "patrol_interval", Type: pluginapi.ConfigFieldTypeNumber, Description: "巡查周期(秒,默认3600=60分钟；UI 以分钟编辑)"},
+		{Name: "patrol_recheck_cooldowns", Type: pluginapi.ConfigFieldTypeBoolean, Description: "定时巡查同时复查插件自动冷却号，探测恢复后提前启用（默认开）"},
 		{Name: "patrol_timeout", Type: pluginapi.ConfigFieldTypeNumber, Description: "单个凭证探测超时(秒,默认15)"},
 		{Name: "patrol_batch_size", Type: pluginapi.ConfigFieldTypeNumber, Description: "每轮巡查上限(0=不限)"},
 		{Name: "patrol_auth_dir", Type: pluginapi.ConfigFieldTypeString, Description: "auth 目录(可空：自动探测 ~/.cli-proxy-api 等；空保存不会清空已有值)"},
@@ -126,6 +128,9 @@ func applyConfigMap(cfg *xaiquota.Config, m map[string]any) {
 	if v, ok := asBool(m["include_unobserved_quota_est"]); ok {
 		cfg.IncludeUnobservedQuotaEst = v
 	}
+	if v, ok := asFloat(m["quota_usage_cooldown_ratio"]); ok && v >= 0 {
+		cfg.QuotaUsageCooldownRatio = v
+	}
 	if v, ok := asString(m["cpamp_url"]); ok {
 		cfg.CPAMPURL = strings.TrimSpace(v)
 	}
@@ -140,6 +145,9 @@ func applyConfigMap(cfg *xaiquota.Config, m map[string]any) {
 	}
 	if v, ok := asFloat(m["patrol_interval"]); ok && v > 0 {
 		cfg.PatrolInterval = v
+	}
+	if v, ok := asBool(m["patrol_recheck_cooldowns"]); ok {
+		cfg.PatrolRecheckCooldowns = v
 	}
 	if v, ok := asFloat(m["patrol_timeout"]); ok && v > 0 {
 		cfg.PatrolTimeout = v

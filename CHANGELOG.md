@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.32
+
+### 被动 429、额度阈值与冷却自动恢复
+- usage typed/raw 字段始终合并；即使宿主 `Failed=false`，只要 `Failure` 带明确 HTTP 状态与正文也不会漏掉 429
+- 新增 `quota_usage_cooldown_ratio`：按实测 `actual/limit` 或 rate-limit headers 达到比例后软冷却 24h；`0=关闭`，支持大于 100% 的阈值
+- 巡查保留响应头，HTTP 200 达阈值时保持/进入冷却；低于阈值的插件冷却号恢复启用
+- 新增 `patrol_recheck_cooldowns`（默认开）：定时巡查使用综合范围，覆盖启用号与插件冷却号，且冷却号优先避免被每轮上限饿死
+- 手动全量仍只扫启用号，手动复查仍只扫插件冷却号；用户手动停用永不参与自动恢复
+- 修复移动端 Grid 卡片被宽表撑出视口；新增控件兼容 CPA/CPAMP 深色主题
+
 ## 0.3.31
 
 ### 换入口 IP / 错误本地 Key 后可恢复

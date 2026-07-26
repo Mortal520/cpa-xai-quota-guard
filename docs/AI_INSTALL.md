@@ -1,7 +1,7 @@
 # AI 一键安装指令（cpa-xai-quota-guard）
 
 面向：**把本段完整复制给任意 AI 助手**，让其在你的 CPA 主机上安装/升级插件。  
-当前稳定版：**v0.3.13**  
+当前稳定版：**v0.3.32**
 仓库：https://github.com/Mortal520/cpa-xai-quota-guard
 
 ---
@@ -9,14 +9,14 @@
 ## 给 AI 的一键提示词（复制整段）
 
 ```text
-你是运维助手。请在当前机器上为 CLIProxyAPI（CPA）安装/升级开源插件 cpa-xai-quota-guard v0.3.13。
+你是运维助手。请在当前机器上为 CLIProxyAPI（CPA）安装/升级开源插件 cpa-xai-quota-guard v0.3.32。
 
 目标：
 1) 下载官方 Release 对应架构的 zip
 2) 解压库文件到 CPA 的 plugins/<goos>/<goarch>/
 3) 合并 plugins.configs.cpa-xai-quota-guard 最小配置（不要覆盖其它插件配置）
 4) 重启 CPA（docker 容器名或 systemd 以现场为准）
-5) 用 management API 验证 state.version == 0.3.13
+5) 用 management API 验证 state.version == 0.3.32
 
 硬性约束：
 - 插件 ID：cpa-xai-quota-guard
@@ -34,17 +34,17 @@
 
 架构映射：
 | OS/Arch | zip 资产名 | 库文件 |
-| linux/amd64 | cpa-xai-quota-guard_0.3.13_linux_amd64.zip | cpa-xai-quota-guard.so |
-| linux/arm64 | cpa-xai-quota-guard_linux_arm64.zip | cpa-xai-quota-guard.so |
-| darwin/amd64 | cpa-xai-quota-guard_darwin_amd64.zip | cpa-xai-quota-guard.dylib |
-| darwin/arm64 | cpa-xai-quota-guard_darwin_arm64.zip | cpa-xai-quota-guard.dylib |
-| windows/amd64 | cpa-xai-quota-guard_windows_amd64.zip | cpa-xai-quota-guard.dll |
+| linux/amd64 | cpa-xai-quota-guard_0.3.32_linux_amd64.zip | cpa-xai-quota-guard.so |
+| linux/arm64 | cpa-xai-quota-guard_0.3.32_linux_arm64.zip | cpa-xai-quota-guard.so |
+| darwin/amd64 | cpa-xai-quota-guard_0.3.32_darwin_amd64.zip | cpa-xai-quota-guard.dylib |
+| darwin/arm64 | cpa-xai-quota-guard_0.3.32_darwin_arm64.zip | cpa-xai-quota-guard.dylib |
+| windows/amd64 | cpa-xai-quota-guard_0.3.32_windows_amd64.zip | cpa-xai-quota-guard.dll |
 
 Release 下载（官方）：
-https://github.com/Mortal520/cpa-xai-quota-guard/releases/download/v0.3.13/<资产名>
+https://github.com/Mortal520/cpa-xai-quota-guard/releases/download/v0.3.32/<资产名>
 
 加速示例（可选）：
-https://ghproxy.com/https://github.com/Mortal520/cpa-xai-quota-guard/releases/download/v0.3.13/<资产名>
+https://ghproxy.com/https://github.com/Mortal520/cpa-xai-quota-guard/releases/download/v0.3.32/<资产名>
 
 安装路径示例（Linux amd64）：
 $CPA_ROOT/plugins/linux/amd64/cpa-xai-quota-guard.so
@@ -59,6 +59,8 @@ cpa-xai-quota-guard:
   state_path: "data/cpa-xai-quota-guard-state.json"
   patrol_enabled: false
   patrol_interval: 3600
+  patrol_recheck_cooldowns: true
+  quota_usage_cooldown_ratio: 0
   patrol_timeout: 15
   patrol_auth_dir: "/root/.cli-proxy-api"
   patrol_proxy_url: ""
@@ -87,7 +89,7 @@ export CPA_PLUGINS_DIR="/path/to/cliproxyapi/plugins"   # 必改：plugins 根�
 export CPA_MGMT_URL="http://127.0.0.1:8317"             # 管理 API
 export CPA_MGMT_KEY="<CPA_MANAGEMENT_KEY>"              # 管理密钥（勿提交）
 export PATROL_AUTH_DIR="/root/.cli-proxy-api"           # xAI auth 目录
-export VER="v0.3.13"
+export VER="v0.3.32"
 export USE_GHPROXY=0   # 1=走 ghproxy 加速
 # =====================
 
@@ -95,10 +97,10 @@ set -euo pipefail
 ARCH=$(uname -m)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$OS-$ARCH" in
-  linux-x86_64|linux-amd64)  GOOS=linux;  GOARCH=amd64; LIB=cpa-xai-quota-guard.so;   ZIP=cpa-xai-quota-guard_0.3.13_linux_amd64.zip ;;
-  linux-aarch64|linux-arm64) GOOS=linux;  GOARCH=arm64; LIB=cpa-xai-quota-guard.so;   ZIP=cpa-xai-quota-guard_linux_arm64.zip ;;
-  darwin-x86_64)             GOOS=darwin; GOARCH=amd64; LIB=cpa-xai-quota-guard.dylib; ZIP=cpa-xai-quota-guard_darwin_amd64.zip ;;
-  darwin-arm64)              GOOS=darwin; GOARCH=arm64; LIB=cpa-xai-quota-guard.dylib; ZIP=cpa-xai-quota-guard_darwin_arm64.zip ;;
+  linux-x86_64|linux-amd64)  GOOS=linux;  GOARCH=amd64; LIB=cpa-xai-quota-guard.so;    ZIP=cpa-xai-quota-guard_0.3.32_linux_amd64.zip ;;
+  linux-aarch64|linux-arm64) GOOS=linux;  GOARCH=arm64; LIB=cpa-xai-quota-guard.so;    ZIP=cpa-xai-quota-guard_0.3.32_linux_arm64.zip ;;
+  darwin-x86_64)             GOOS=darwin; GOARCH=amd64; LIB=cpa-xai-quota-guard.dylib; ZIP=cpa-xai-quota-guard_0.3.32_darwin_amd64.zip ;;
+  darwin-arm64)              GOOS=darwin; GOARCH=arm64; LIB=cpa-xai-quota-guard.dylib; ZIP=cpa-xai-quota-guard_0.3.32_darwin_arm64.zip ;;
   *) echo "不支持的架构: $OS $ARCH"; exit 1 ;;
 esac
 
@@ -137,7 +139,7 @@ if [ -n "${CPA_MGMT_KEY}" ] && [ "${CPA_MGMT_KEY}" != "<CPA_MANAGEMENT_KEY>" ]; 
     "${CPA_MGMT_URL}/v0/management/cpa-xai-quota-guard/state?view=focus" \
     | sed -n '1,5p' || true
   echo
-  echo "请确认 JSON 中 version 为 0.3.13 且 enabled 为 true"
+  echo "请确认 JSON 中 version 为 0.3.32 且 enabled 为 true"
 else
   echo "未设置有效 CPA_MGMT_KEY，跳过 API 验证；请到管理页确认插件版本"
 fi
@@ -166,6 +168,8 @@ plugins:
       state_path: "data/cpa-xai-quota-guard-state.json"
       patrol_enabled: false
       patrol_interval: 3600
+      patrol_recheck_cooldowns: true
+      quota_usage_cooldown_ratio: 0
       patrol_timeout: 15
       patrol_auth_dir: "/root/.cli-proxy-api"
       patrol_proxy_url: ""
@@ -179,7 +183,7 @@ plugins:
 ## 真·一行命令（Linux amd64 + 已设环境变量）
 
 ```bash
-VER=v0.3.13 GOOS=linux GOARCH=amd64 LIB=cpa-xai-quota-guard.so ZIP=cpa-xai-quota-guard_0.3.13_linux_amd64.zip \
+VER=v0.3.32 GOOS=linux GOARCH=amd64 LIB=cpa-xai-quota-guard.so ZIP=cpa-xai-quota-guard_0.3.32_linux_amd64.zip \
 DEST="${CPA_PLUGINS_DIR:-./plugins}/linux/amd64" && mkdir -p "$DEST" && \
 curl -fL "https://github.com/Mortal520/cpa-xai-quota-guard/releases/download/${VER}/${ZIP}" -o /tmp/${ZIP} && \
 unzip -o /tmp/${ZIP} -d /tmp/cpaqg && \
@@ -190,7 +194,7 @@ ls -la "$DEST/$LIB" && echo "请重启 CPA 并配置 management_key / patrol_aut
 GitHub 慢时把 URL 换成：
 
 ```text
-https://ghproxy.com/https://github.com/Mortal520/cpa-xai-quota-guard/releases/download/v0.3.13/cpa-xai-quota-guard_0.3.13_linux_amd64.zip
+https://ghproxy.com/https://github.com/Mortal520/cpa-xai-quota-guard/releases/download/v0.3.32/cpa-xai-quota-guard_0.3.32_linux_amd64.zip
 ```
 
 ---
@@ -198,7 +202,7 @@ https://ghproxy.com/https://github.com/Mortal520/cpa-xai-quota-guard/releases/do
 ## Windows（PowerShell，amd64）
 
 ```powershell
-$Ver = "v0.3.13"
+$Ver = "v0.3.32"
 $Plugins = "C:\path\to\cliproxyapi\plugins"   # 改这里
 $Dest = Join-Path $Plugins "windows\amd64"
 $Zip = "cpa-xai-quota-guard_windows_amd64.zip"
@@ -242,10 +246,10 @@ plugins:
 curl -sS -H "X-Management-Key: $KEY" \
   "$URL/v0/management/cpa-xai-quota-guard/state?view=focus"
 
-# 期望： "version":"0.3.13"  "enabled": true
+# 期望： "version":"0.3.32"  "enabled": true
 
 # 2) 日志关键字
-# plugin registered plugin_id=cpa-xai-quota-guard version=0.3.13
+# plugin registered plugin_id=cpa-xai-quota-guard version=0.3.32
 ```
 
 | 现象 | 处理 |
@@ -267,6 +271,6 @@ curl -sS -H "X-Management-Key: $KEY" \
 ## 参考
 
 - 安装详解：https://github.com/Mortal520/cpa-xai-quota-guard/blob/main/docs/INSTALL.md  
-- Releases：https://github.com/Mortal520/cpa-xai-quota-guard/releases/tag/v0.3.13  
+- Releases：https://github.com/Mortal520/cpa-xai-quota-guard/releases/tag/v0.3.32
 - 仓库：https://github.com/Mortal520/cpa-xai-quota-guard  
 

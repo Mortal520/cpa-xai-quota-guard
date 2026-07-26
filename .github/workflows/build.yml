@@ -25,7 +25,7 @@ jobs:
           printf '\nreplace github.com/router-for-me/CLIProxyAPI/v7 => ./CLIProxyAPI-src\n' >> go.mod
           go mod download || true
       - name: Test
-        run: go test ./internal/xaiquota/ -count=1
+        run: go test ./... -count=1
 
   build:
     name: Build ${{ matrix.goos }}-${{ matrix.goarch }}

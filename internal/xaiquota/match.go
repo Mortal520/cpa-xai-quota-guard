@@ -1,8 +1,8 @@
 package xaiquota
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -142,6 +142,31 @@ func MatchSpendingLimitQuota(in MatchInput) (MatchResult, bool) {
 	}, true
 }
 
+// MatchUsageRatioThreshold turns an observed per-account actual/limit ratio
+// into a soft 24-hour cooldown. Ratios greater than 1 are valid because xAI's
+// rolling counter may exceed the published limit before the next observation.
+func MatchUsageRatioThreshold(actual, limit int64, threshold float64, now time.Time) (MatchResult, bool) {
+	if actual < 0 || limit <= 0 || threshold <= 0 || threshold != threshold {
+		return MatchResult{}, false
+	}
+	ratio := float64(actual) / float64(limit)
+	if ratio < threshold {
+		return MatchResult{}, false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return MatchResult{
+		RecoverAt: now.Add(24 * time.Hour),
+		Reason: fmt.Sprintf(
+			"额度使用 %.1f%% 已达到冷却阈值 %.1f%%，软冷却 24h · actual/limit=%d/%d",
+			ratio*100, threshold*100, actual, limit,
+		),
+		Signal: "usage_ratio_threshold",
+		Soft:   true,
+	}, true
+}
+
 // buildHumanReason produces a short Chinese/English-mixed summary for UI.
 func buildHumanReason(body, signal string, recoverAt, now time.Time) string {
 	code := extractErrorCode(body)
@@ -228,7 +253,6 @@ func normalizeToken(s string) string {
 	s = strings.ReplaceAll(s, " ", "")
 	return s
 }
-
 
 // IsInvalidCredentials reports dead xAI OAuth credentials that should be deleted.
 // Typical: HTTP 401 + invalid/expired credentials / no auth context / invalid_grant revoked.
@@ -318,7 +342,6 @@ func IsSpendingLimitBlocked(statusCode int, body string) bool {
 	return false
 }
 
-
 // IsModelRegionUnavailable reports geo/IP/model availability denials.
 // These are NOT dead credentials — do not DELETE (proxy egress / region issue).
 func IsModelRegionUnavailable(statusCode int, body string) bool {
@@ -386,6 +409,7 @@ func IsPermissionDenied(statusCode int, body string) bool {
 	}
 	return false
 }
+
 // IsPlatformCapacityExhausted detects xAI/Grok "model at capacity / high demand"
 // 429s. These are shared platform load signals, not account free-usage exhaustion.
 // Callers must skip cooldown/delete (and patrol must not treat as free-usage).
@@ -827,7 +851,6 @@ func stringify(v any) string {
 	return string(b)
 }
 
-
 // defaultRecoverFromBody handles xAI/Grok free-usage exhaustion that states a
 // rolling window (commonly 24h) but omits Retry-After / reset timestamps.
 func defaultRecoverFromBody(body string, headers http.Header, now time.Time, maxReset float64) (time.Time, bool) {
@@ -933,4 +956,3 @@ func EffectiveRecoverAtMS(rec *AccountRecord) int64 {
 	}
 	return r
 }
-

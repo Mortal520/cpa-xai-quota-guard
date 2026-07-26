@@ -1,4 +1,4 @@
-# 账号处理逻辑审查（0.2.19）
+# 账号处理逻辑审查（0.3.32）
 
 ## 两条入口
 
@@ -21,7 +21,8 @@
 | 401 invalid/expired | DELETE | DELETE |
 | 404/405/422/5xx 探测 | n/a | error |
 | 网络超时/代理失败 | n/a | error |
-| 200 | 记用量 | alive；spending 冷却则 reenable |
+| 200，低于阈值 | 记用量 | alive；插件冷却号则 reenable |
+| 200，达到额度阈值 | plugin_auto 冷却 24h | plugin_auto 冷却/保持冷却，不重置时钟 |
 
 ## 所有权与手动禁用
 
@@ -31,10 +32,10 @@
 
 ## 巡查候选
 
-- **all**：启用中的 xAI + `spending_limit` 冷却号（用于恢复探测）。
-- **不含** free-usage 冷却号（靠 Tick 到期恢复，避免无意义探测）。
-- **spending_only**：仅 spending 冷却复查。
-- 已禁用的非 spending 号不巡查。
+- **all**：仅启用中的 xAI，供手动全量巡查。
+- **spending_only**：仅本插件拥有的已禁用冷却号；历史名称保留，实际覆盖 429/402/threshold。
+- **scheduled**：启用号 + 本插件冷却号，冷却号优先；用户手动停用不进入候选。
+- `patrol_recheck_cooldowns=false` 时定时巡查退回 all。
 
 ## 已确认的实现缺口 / 风险
 
@@ -49,7 +50,7 @@
 
 ### P2
 1. free-usage 与 spending 都用 `StateAutoDisabled`，仅靠 `Signal` 区分；UI 需明确展示 signal。
-2. spending 冷却墙钟 24h 与真实恢复可能不一致（设计为巡查提前恢复）。
+2. soft 冷却墙钟 24h 与真实滚动恢复可能不一致（定时/手动复查可提前恢复）。
 3. `recordProbeResult` 默认分支（0.2.19）：未知 action **计 error**，不再计 alive。
 4. 表单 dirty 与配置 Reconfigure 仍可能偶发覆盖（0.2.8 已缓解）。
 
@@ -63,13 +64,16 @@
 - `TestMatchGrokFreeUsageExhausted24h`
 - `TestMatchSpendingLimitQuotaDistinctFrom429`
 
-缺：patrol 路径 429 冷却的集成单测（建议 0.2.10 补）。
+- `TestProbeOneCredentialCoolsOnSuccessfulThresholdHeaders`
+- `TestProbeOneCredentialReenablesRecoveredPluginCooldown`
+- `TestProbeOneCredentialKeepsCooldownWhenStillAboveThreshold`
+- `TestSelectPatrolCandidatesScheduledIncludesEnabledAndPluginCooldownOnly`
 
 ## 结论
 
 - **429 不删除**：HandleUsage 与 Patrol 均成立。
 - **巡查 429 的正确动作是冷却（启用号）或恢复（spending 冷却号）**，不是删除，也不是简单 alive。
-- 账号状态机整体设计正确；主要问题在巡查与 usage 路径不对称、探测网络环境、历史误删日志污染观感。
+- usage 与巡查的 429/阈值/恢复边界已对齐；剩余主要风险来自探测模型、代理出口与上游业务语义变化。
 
 ## 0.2.19 增补
 

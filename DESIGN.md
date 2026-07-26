@@ -1,7 +1,7 @@
 # cpa-xai-quota-guard 设计文档
 
 > xAI 专用额度/死号管控插件（CLIProxyAPI native Go）  
-> 当前实现版本：**0.2.19**（以 `main.go` 中 `pluginVer` 为准）
+> 当前实现版本：**0.3.32**（以 `main.go` 中 `pluginVer` 为准）
 
 ## 1. 目标
 
@@ -11,6 +11,7 @@
 2. 明确的 **积分/订阅 spending-limit（402）** → 临时禁用（signal=`spending_limit`），与 429 区分；巡查探测可用后启用  
 3. 明确的 **死号**（权限拒绝 403 / 凭证失效 401）→ 删除凭证  
 4. 用户手动禁用永不自动启用；状态标签持久化  
+5. 可选按账号实测额度比例提前冷却 24h，减少请求正面撞上 429
 
 ## 2. 硬性约束
 
@@ -23,6 +24,7 @@
 7. 用户手动禁用永远不会被自动启用。  
 8. 状态标签：`plugin_auto` / `user_manual`，持久化到 `state_path`。  
 9. 401/403 死号路径 → **DELETE**；402 spending-limit → **plugin_auto 冷却**（非删除）。  
+10. 额度阈值仅在有精确 `actual/limit` 时生效；`0=关闭`，允许大于 100%，平台高负载不参与。
 
 ## 3. 与 CPAMP 的对齐
 
@@ -95,13 +97,14 @@ Invalid or expired credentials (auth_kind=bearer, ... reason=no auth context)
 
 1. **不是死号**：凭证仍可能对其它 free 档模型可用；`permission-denied`/401 才删。  
 2. **模型相关**：同一账号对 `grok-3` 可能 402，对 `grok-4.5-build-free` 可能 200/429。  
-3. **业务 usage**：真实请求返回 402 → 立即 `plugin_auto` 冷却（signal=`spending_limit`），与 429 free-usage 分状态。  
+3. **业务 usage**：真实请求连续命中 402 达 `spending_confirm_hits`（默认 3/900s）后 `plugin_auto` 冷却，与 429 free-usage 分状态。
 4. **巡查探测**：
    - 主模型 = `patrol_model`（默认 free 档）  
    - `patrol_auto_model_switch=false`（默认）：只测主模型；402 → 冷却  
    - `=true`：主模型 402 后 `GET /models`，再试最多 4 个备用（优先 id 含 `free`）；全部 402 → 冷却；任一 200/429 → 存活/恢复  
 5. **恢复**：
-   - 巡查探测 **200** → 立即启用任意 `plugin_auto` 冷却（free-usage / spending）
+   - 巡查探测 **200** 且低于额度阈值 → 立即启用任意 `plugin_auto` 冷却（free-usage / spending / threshold）
+   - 巡查探测 **200** 但仍达到额度阈值 → 保持冷却，不后推首次 24h 时钟
    - spending 冷却 + 探测 **429 free-usage** → 视为 free 路径仍可用，启用
    - Tick：`now >= EffectiveRecoverAtMS` 自动启用（仅 `plugin_auto`，永不碰 `user_manual`）
 6. **复查**：改 `patrol_model` / 自动换模后，用 scope=`spending_only` 仅扫冷却号  
@@ -164,6 +167,7 @@ context canceled  + Content-Type: text/event-stream
 active
   └─ 429 free-usage 合法 → auto_disabled (disable_source=plugin_auto, recover 锚点=disabled_at+24h soft)
   └─ 402 spending-limit → auto_disabled (signal=spending_limit, soft ~24h)
+  └─ 成功响应 actual/limit 达配置阈值 → auto_disabled (signal=usage_ratio_threshold, 24h soft)
 auto_disabled (plugin_auto)
   ├─ now >= EffectiveRecoverAtMS → Tick 启用 → active
   ├─ 巡查/复查 200 → 立即启用 → active
@@ -246,7 +250,7 @@ dead credential (401 / 真 403 permission-denied)
 1. free-usage 滚动窗口以 xAI 文案与生产样例为准；无 `Retry-After` 时用 24h 默认。  
 2. 402 与 429 free-usage **不得混淆**：均为冷却，但 **signal/Reason/恢复路径不同**（429 到点 tick；402 以巡查探测为主、tick 软上限为辅）。  
 3. 凭证数依赖 management `auth-files`；主机繁忙时可能瞬时失败 → sticky 掩盖，非实时强一致。  
-4. `include_unobserved_quota_est=true` 时总额度为 **估**，未观测账号按默认 2M 计。  
+4. `include_unobserved_quota_est=true` 时总额度为 **估**，未观测启用账号按已观测 limit 众数推断，无快照时最后回退 1M。
 5. 今日已用依赖 CPA 是否在 usage 事件中带 token Detail；缺 Detail 时可能偏低（可用 CPAMP 回补地板）。  
 6. 失败但从未成功的账号默认保留，不自动清池。  
 
@@ -269,24 +273,25 @@ dead credential (401 / 真 403 permission-denied)
 - commit 前扫描 staged diff  
 ## 主动巡查 (Patrol)
 
-- 目标：全量探测**当前启用**的 xAI + **spending_limit 冷却号**；删除不可恢复死号（403/401）；402 冷却/恢复。
-- 不巡查 `disabled=true` 的文件；不加 failed/success 筛选。
-- 实现：worker pool + 直读 auth 文件 token + 可选代理；结果写入 `delete_history`（reason 前缀 `patrol:`）。
-- 调度：`tickerLoop` 在 `patrol_enabled && patrol_auth_dir!=""` 时按 `patrol_interval` 触发。
+- 手动 `all`：仅当前启用的 xAI；不加 failed/success 筛选。
+- 手动 `spending_only`：仅 `plugin_auto` 拥有的已禁用冷却号（名称为历史兼容，覆盖 429/402/threshold）。
+- 定时 `scheduled`：启用号 + 插件冷却号；冷却号优先，手动停用始终排除；可用 `patrol_recheck_cooldowns=false` 退回仅启用号。
+- 实现：worker pool + 直读 auth 文件 token + 可选代理；结果持久化到巡查/动作历史。
+- 调度：`tickerLoop` 在 `patrol_enabled=true` 时按 `patrol_interval` 触发，auth 目录可自动解析。
 - 状态同步：删除后 `Store.Remove`；`state` 构建时 prune 不在 CPA inventory 的 tracked 记录。
 - 配置写回：UI 改动经 CPA management plugin config 持久化；功能开关字段为 `quota_guard_enabled`。
 
 
 ## 巡查探测模型 (0.2.4)
 
-- 配置项 patrol_model，默认 grok-4.5-build-free。
+- 配置项 patrol_model，默认 grok-4.5。
 - 禁止默认使用无免费额度的付费模型（如硬编码 grok-3），否则会全员 402 spending-limit 误伤。
 - UI 从凭证 GET /models + 建议列表选择；GET .../patrol/models。
 
 
 ## 10. 状态栏与 metrics（0.2.18+）
 
-- `QuotaTotalEst`（日额度池）：默认 `xai_enabled * DefaultFreeLimit(2M)`；禁用账号不计入。
+- `QuotaTotalEst`（日额度池）：启用号逐号 limit 合计；未观测启用号按快照众数推断，最后回退 `DefaultFreeLimit(1M)`。
 - `UsedToday` / `UsedTotal`：仅 `usage.handle` 累加；`ObserveFreeQuota` **只写** `QuotaByAuth` 快照。
 - `RollingUsedKnown` / `RollingLimitKnown`：存活 auth 的 free-usage 快照；`liveAuth` 过滤已删号。
 - UI 进度条：今日已用 / 日额度池。
@@ -305,3 +310,9 @@ dead credential (401 / 真 403 permission-denied)
 - 单号上限：InferFreeLimitPerAccount 从 free-usage 快照 limit 取众数，默认回退 1M
 - 日池=已知启用 limit 合计 + 未观测启用 × 推断单号上限
 - 滚动 used：仅启用号，actual 封顶 limit
+
+## 额度阈值与定时恢复（0.3.32）
+- `quota_usage_cooldown_ratio`：`0=关闭`，`0.9=90%`，`1.2=120%`；不截断到 100%
+- 被动成功 usage 与主动巡查 200 都会读取正文/响应头的 `actual/limit`
+- 首次达到阈值后 `plugin_auto` 冷却 24h；重复命中不重启时钟
+- `patrol_recheck_cooldowns=true` 时定时综合巡查可提前恢复已回落到阈值以下的冷却号

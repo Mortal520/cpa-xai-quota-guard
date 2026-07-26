@@ -92,12 +92,12 @@ func buildManagementRegistration() managementRegistration {
 			{Method: "POST", Path: "/cpa-xai-quota-guard/toggle", Description: "开关 enabled"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/bind-key", Description: "保存 Management Key 到进程（与浏览器同一把，纯 CPA）"},
 			{Method: "POST", Path: "/cpa-xai-quota-guard/run", Description: "手动触发恢复扫描"},
-		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol", Description: "全量巡查：仅当前启用的 xAI 凭证"},
-		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/spending", Description: "仅复核：plugin_auto 冷却号(429 free-usage 与 402 spending)"},
-		{Method: "GET", Path: "/cpa-xai-quota-guard/patrol/status", Description: "巡查状态与日志"},
-		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/stop", Description: "停止当前巡查"},
-		{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/config", Description: "保存定时巡查配置"},
-		{Method: "GET", Path: "/cpa-xai-quota-guard/patrol/models", Description: "探测可用模型列表(凭证 /models + 建议)"},
+			{Method: "POST", Path: "/cpa-xai-quota-guard/patrol", Description: "全量巡查：仅当前启用的 xAI 凭证"},
+			{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/spending", Description: "仅复核：plugin_auto 冷却号(429 free-usage 与 402 spending)"},
+			{Method: "GET", Path: "/cpa-xai-quota-guard/patrol/status", Description: "巡查状态与日志"},
+			{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/stop", Description: "停止当前巡查"},
+			{Method: "POST", Path: "/cpa-xai-quota-guard/patrol/config", Description: "保存定时巡查配置"},
+			{Method: "GET", Path: "/cpa-xai-quota-guard/patrol/models", Description: "探测可用模型列表(凭证 /models + 建议)"},
 		},
 	}
 }
@@ -640,6 +640,7 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			"max_reset_seconds":            cfg.MaxResetSeconds,
 			"min_reset_seconds":            cfg.MinResetSeconds,
 			"include_unobserved_quota_est": cfg.IncludeUnobservedQuotaEst,
+			"quota_usage_cooldown_ratio":   cfg.QuotaUsageCooldownRatio,
 			"management_url":               resolveManagementBaseURL(cfg.ManagementURL),
 			"management_url_raw":           cfg.ManagementURL,
 			"management_url_configured":    strings.TrimSpace(cfg.ManagementURL) != "",
@@ -652,48 +653,49 @@ func stateResponse(req managementRequest) ([]byte, error) {
 			"cpamp_url":                    cfg.CPAMPURL,
 			"cpamp_admin_key_set":          cfg.CPAMPAdminKey != "",
 			"cpamp_optional":               true,
-			"pure_cpa_mode":               strings.TrimSpace(cfg.CPAMPURL) == "" || strings.TrimSpace(cfg.CPAMPAdminKey) == "",
+			"pure_cpa_mode":                strings.TrimSpace(cfg.CPAMPURL) == "" || strings.TrimSpace(cfg.CPAMPAdminKey) == "",
 			"webhook_url_set":              cfg.WebhookURL != "",
 			"patrol_enabled":               cfg.PatrolEnabled,
 			"patrol_interval":              cfg.PatrolInterval,
+			"patrol_recheck_cooldowns":     cfg.PatrolRecheckCooldowns,
 			"patrol_timeout":               cfg.PatrolTimeout,
 			"patrol_auth_dir":              xaiquota.ResolvePatrolAuthDir(cfg.PatrolAuthDir),
 			"patrol_auth_dir_raw":          cfg.PatrolAuthDir,
 			"patrol_concurrency":           cfg.PatrolConcurrency,
 			"patrol_batch_size":            cfg.PatrolBatchSize,
-			"patrol_model":                cfg.PatrolModel,
-			"patrol_auto_model_switch":   cfg.PatrolAutoModelSwitch,
-			"patrol_initial_delay_sec":  cfg.PatrolInitialDelaySec,
-			"patrol_proxy_url":           cfg.PatrolProxyURL,
-			"patrol_proxy_set":           cfg.PatrolProxyURL != "",
+			"patrol_model":                 cfg.PatrolModel,
+			"patrol_auto_model_switch":     cfg.PatrolAutoModelSwitch,
+			"patrol_initial_delay_sec":     cfg.PatrolInitialDelaySec,
+			"patrol_proxy_url":             cfg.PatrolProxyURL,
+			"patrol_proxy_set":             cfg.PatrolProxyURL != "",
 			"spending_confirm_hits":        cfg.SpendingConfirmHits,
 			"spending_confirm_window_sec":  cfg.SpendingConfirmWindowSec,
 		},
 		"accounts": outList,
 		"summary": map[string]any{
-			"total":            accountsTotal,
-			"returned":         len(outList),
-			"view":             view,
-			"tracked":          len(tracked),
-			"inventory_only":   invOnlyN,
-			"auto_disabled":    autoN,
-			"user_manual":      manualN,
-			"recover_due":      dueN,
-			"rolling_over":     overN,
-			"cpa_disabled":     cpaDisabledN,
-			"tier_free":        tierFreeN,
-			"tier_super":       tierSuperN,
-			"tier_heavy":       tierHeavyN,
-			"tier_unknown":     tierUnknownN,
-			"hot_total":        hotTotal,
-			"hot_shown":        hotShown,
-			"hot_hidden":       hotHidden,
-			"focus_hot_cap":    focusHotCap,
+			"total":          accountsTotal,
+			"returned":       len(outList),
+			"view":           view,
+			"tracked":        len(tracked),
+			"inventory_only": invOnlyN,
+			"auto_disabled":  autoN,
+			"user_manual":    manualN,
+			"recover_due":    dueN,
+			"rolling_over":   overN,
+			"cpa_disabled":   cpaDisabledN,
+			"tier_free":      tierFreeN,
+			"tier_super":     tierSuperN,
+			"tier_heavy":     tierHeavyN,
+			"tier_unknown":   tierUnknownN,
+			"hot_total":      hotTotal,
+			"hot_shown":      hotShown,
+			"hot_hidden":     hotHidden,
+			"focus_hot_cap":  focusHotCap,
 		},
-		"metrics":         metrics,
-		"delete_history":  g.ListDeletes(50),
-		"action_history":  g.ListActions(80),
-		"patrol":          g.PatrolStatus(),
+		"metrics":        metrics,
+		"delete_history": g.ListDeletes(50),
+		"action_history": g.ListActions(80),
+		"patrol":         g.PatrolStatus(),
 	})
 }
 
@@ -753,7 +755,6 @@ func deletesResponse() ([]byte, error) {
 	return jsonResponse(map[string]any{"items": guard().ListDeletes(50)})
 }
 
-
 func metricsResetTodayResponse(req managementRequest) ([]byte, error) {
 	if req.Method != http.MethodPost {
 		return okEnvelope(managementResponse{
@@ -786,11 +787,11 @@ func metricsResetTodayResponse(req managementRequest) ([]byte, error) {
 	}
 	after := g.MetricsWithInventory(0, 0, 0)
 	return jsonResponse(map[string]any{
-		"ok":      true,
-		"note":    note,
-		"before":  map[string]any{"used_today": before.UsedToday, "requests_today": before.RequestsToday, "day_key": before.DayKey},
-		"after":   map[string]any{"used_today": after.UsedToday, "requests_today": after.RequestsToday, "day_key": after.DayKey},
-		"kept":    map[string]any{"used_total": after.UsedTotal, "rolling_used": after.RollingUsedKnown},
+		"ok":     true,
+		"note":   note,
+		"before": map[string]any{"used_today": before.UsedToday, "requests_today": before.RequestsToday, "day_key": before.DayKey},
+		"after":  map[string]any{"used_today": after.UsedToday, "requests_today": after.RequestsToday, "day_key": after.DayKey},
+		"kept":   map[string]any{"used_total": after.UsedTotal, "rolling_used": after.RollingUsedKnown},
 	})
 }
 
@@ -808,30 +809,31 @@ func backfillResponse() ([]byte, error) {
 func configResponse() ([]byte, error) {
 	cfg := guard().Config()
 	return jsonResponse(map[string]any{
-		"enabled":                cfg.Enabled,
-		"tick_seconds":           cfg.TickSeconds,
-		"max_reset_seconds":      cfg.MaxResetSeconds,
-		"management_url":         resolveManagementBaseURL(cfg.ManagementURL),
-		"management_url_configured": strings.TrimSpace(cfg.ManagementURL) != "",
-		"management_source":      managementURLSource(cfg.ManagementURL),
-		"management_key_set":     resolveManagementKey(cfg.ManagementKey) != "",
-		"management_key_source":  managementKeySource(cfg.ManagementKey),
-		"pure_cpa_mode":         strings.TrimSpace(cfg.CPAMPURL) == "" || strings.TrimSpace(cfg.CPAMPAdminKey) == "",
-		"state_path":             cfg.StatePath,
-		"patrol_enabled":         cfg.PatrolEnabled,
-		"patrol_interval":        cfg.PatrolInterval,
-		"patrol_timeout":         cfg.PatrolTimeout,
-		"patrol_auth_dir":        cfg.PatrolAuthDir,
-		"patrol_concurrency":     cfg.PatrolConcurrency,
-		"patrol_batch_size":      cfg.PatrolBatchSize,
-		"patrol_model":          cfg.PatrolModel,
-		"patrol_auto_model_switch": cfg.PatrolAutoModelSwitch,
-		"patrol_initial_delay_sec":  cfg.PatrolInitialDelaySec,
-		"patrol_proxy_url":      cfg.PatrolProxyURL,
-		"patrol_proxy_set":      cfg.PatrolProxyURL != "",
+		"enabled":                    cfg.Enabled,
+		"tick_seconds":               cfg.TickSeconds,
+		"max_reset_seconds":          cfg.MaxResetSeconds,
+		"management_url":             resolveManagementBaseURL(cfg.ManagementURL),
+		"management_url_configured":  strings.TrimSpace(cfg.ManagementURL) != "",
+		"management_source":          managementURLSource(cfg.ManagementURL),
+		"management_key_set":         resolveManagementKey(cfg.ManagementKey) != "",
+		"management_key_source":      managementKeySource(cfg.ManagementKey),
+		"pure_cpa_mode":              strings.TrimSpace(cfg.CPAMPURL) == "" || strings.TrimSpace(cfg.CPAMPAdminKey) == "",
+		"state_path":                 cfg.StatePath,
+		"quota_usage_cooldown_ratio": cfg.QuotaUsageCooldownRatio,
+		"patrol_enabled":             cfg.PatrolEnabled,
+		"patrol_interval":            cfg.PatrolInterval,
+		"patrol_recheck_cooldowns":   cfg.PatrolRecheckCooldowns,
+		"patrol_timeout":             cfg.PatrolTimeout,
+		"patrol_auth_dir":            cfg.PatrolAuthDir,
+		"patrol_concurrency":         cfg.PatrolConcurrency,
+		"patrol_batch_size":          cfg.PatrolBatchSize,
+		"patrol_model":               cfg.PatrolModel,
+		"patrol_auto_model_switch":   cfg.PatrolAutoModelSwitch,
+		"patrol_initial_delay_sec":   cfg.PatrolInitialDelaySec,
+		"patrol_proxy_url":           cfg.PatrolProxyURL,
+		"patrol_proxy_set":           cfg.PatrolProxyURL != "",
 	})
 }
-
 
 func bindKeyResponse(req managementRequest) ([]byte, error) {
 	if req.Method != http.MethodPost {
@@ -842,9 +844,9 @@ func bindKeyResponse(req managementRequest) ([]byte, error) {
 		})
 	}
 	var body struct {
-		Key            string `json:"key"`
-		ManagementKey  string `json:"management_key"`
-		Persist        *bool  `json:"persist"`
+		Key           string `json:"key"`
+		ManagementKey string `json:"management_key"`
+		Persist       *bool  `json:"persist"`
 	}
 	_ = json.Unmarshal(req.Body, &body)
 	key := strings.TrimSpace(firstNonEmpty(body.Key, body.ManagementKey))
@@ -947,7 +949,6 @@ func runResponse() ([]byte, error) {
 	return jsonResponse(map[string]any{"ok": true, "ran": true})
 }
 
-
 func patrolSpendingResponse(req managementRequest) ([]byte, error) {
 	if req.Method != http.MethodPost {
 		return okEnvelope(managementResponse{
@@ -976,8 +977,8 @@ func patrolResponse(req managementRequest) ([]byte, error) {
 	g := guard()
 	status := g.PatrolRunOnce()
 	return jsonResponse(map[string]any{
-		"ok":         true,
-		"patrol":     status,
+		"ok":     true,
+		"patrol": status,
 	})
 }
 
@@ -1046,7 +1047,7 @@ func patrolStopResponse() ([]byte, error) {
 	g := guard()
 	g.PatrolStop()
 	return jsonResponse(map[string]any{
-		"ok":     true,
+		"ok":      true,
 		"message": "stop requested",
 	})
 }
@@ -1060,16 +1061,18 @@ func patrolConfigResponse(req managementRequest) ([]byte, error) {
 		})
 	}
 	var body struct {
-		PatrolEnabled          *bool    `json:"patrol_enabled"`
-		PatrolInterval         *float64 `json:"patrol_interval"`
-		PatrolTimeout          *float64 `json:"patrol_timeout"`
-		PatrolAuthDir          *string  `json:"patrol_auth_dir"`
-		PatrolProxyURL         *string  `json:"patrol_proxy_url"`
-		PatrolConcurrency      *float64 `json:"patrol_concurrency"`
-		PatrolBatchSize        *float64 `json:"patrol_batch_size"`
-		PatrolModel            *string  `json:"patrol_model"`
-		PatrolAutoModelSwitch  *bool    `json:"patrol_auto_model_switch"`
-		PatrolInitialDelaySec  *float64 `json:"patrol_initial_delay_sec"`
+		PatrolEnabled           *bool    `json:"patrol_enabled"`
+		PatrolInterval          *float64 `json:"patrol_interval"`
+		PatrolRecheckCooldowns  *bool    `json:"patrol_recheck_cooldowns"`
+		QuotaUsageCooldownRatio *float64 `json:"quota_usage_cooldown_ratio"`
+		PatrolTimeout           *float64 `json:"patrol_timeout"`
+		PatrolAuthDir           *string  `json:"patrol_auth_dir"`
+		PatrolProxyURL          *string  `json:"patrol_proxy_url"`
+		PatrolConcurrency       *float64 `json:"patrol_concurrency"`
+		PatrolBatchSize         *float64 `json:"patrol_batch_size"`
+		PatrolModel             *string  `json:"patrol_model"`
+		PatrolAutoModelSwitch   *bool    `json:"patrol_auto_model_switch"`
+		PatrolInitialDelaySec   *float64 `json:"patrol_initial_delay_sec"`
 	}
 	_ = json.Unmarshal(req.Body, &body)
 	cfg := guard().Config()
@@ -1078,6 +1081,12 @@ func patrolConfigResponse(req managementRequest) ([]byte, error) {
 	}
 	if body.PatrolInterval != nil && *body.PatrolInterval > 0 {
 		cfg.PatrolInterval = *body.PatrolInterval
+	}
+	if body.PatrolRecheckCooldowns != nil {
+		cfg.PatrolRecheckCooldowns = *body.PatrolRecheckCooldowns
+	}
+	if body.QuotaUsageCooldownRatio != nil && *body.QuotaUsageCooldownRatio >= 0 {
+		cfg.QuotaUsageCooldownRatio = *body.QuotaUsageCooldownRatio
 	}
 	if body.PatrolTimeout != nil && *body.PatrolTimeout > 0 {
 		cfg.PatrolTimeout = *body.PatrolTimeout
@@ -1117,38 +1126,41 @@ func patrolConfigResponse(req managementRequest) ([]byte, error) {
 	// Persist full patrol settings into CPA plugin config (GET+merge+PUT).
 	// Always write patrol_proxy_url (including empty) so clear/save is real.
 	patch := map[string]any{
-		"patrol_enabled":           cfg.PatrolEnabled,
-		"patrol_interval":          cfg.PatrolInterval,
-		"patrol_timeout":           cfg.PatrolTimeout,
-		"patrol_auth_dir":          cfg.PatrolAuthDir,
-		"patrol_concurrency":       cfg.PatrolConcurrency,
-		"patrol_batch_size":        cfg.PatrolBatchSize,
-		"patrol_model":             cfg.PatrolModel,
-		"patrol_auto_model_switch": cfg.PatrolAutoModelSwitch,
-		"patrol_initial_delay_sec":  cfg.PatrolInitialDelaySec,
-		"patrol_proxy_url":         cfg.PatrolProxyURL,
+		"patrol_enabled":             cfg.PatrolEnabled,
+		"patrol_interval":            cfg.PatrolInterval,
+		"patrol_recheck_cooldowns":   cfg.PatrolRecheckCooldowns,
+		"quota_usage_cooldown_ratio": cfg.QuotaUsageCooldownRatio,
+		"patrol_timeout":             cfg.PatrolTimeout,
+		"patrol_auth_dir":            cfg.PatrolAuthDir,
+		"patrol_concurrency":         cfg.PatrolConcurrency,
+		"patrol_batch_size":          cfg.PatrolBatchSize,
+		"patrol_model":               cfg.PatrolModel,
+		"patrol_auto_model_switch":   cfg.PatrolAutoModelSwitch,
+		"patrol_initial_delay_sec":   cfg.PatrolInitialDelaySec,
+		"patrol_proxy_url":           cfg.PatrolProxyURL,
 	}
 	if err := writePluginConfig(cfg, patch); err != nil {
 		return jsonResponse(map[string]any{"ok": false, "error": err.Error()})
 	}
 	guard().ApplyConfig(cfg)
 	return jsonResponse(map[string]any{
-		"ok":                       true,
-		"persisted":                true,
-		"patrol_enabled":           cfg.PatrolEnabled,
-		"patrol_interval":          cfg.PatrolInterval,
-		"patrol_timeout":           cfg.PatrolTimeout,
-		"patrol_auth_dir":          cfg.PatrolAuthDir,
-		"patrol_concurrency":       cfg.PatrolConcurrency,
-		"patrol_batch_size":        cfg.PatrolBatchSize,
-		"patrol_model":             cfg.PatrolModel,
-		"patrol_auto_model_switch": cfg.PatrolAutoModelSwitch,
-		"patrol_initial_delay_sec":  cfg.PatrolInitialDelaySec,
-		"patrol_proxy_url":         cfg.PatrolProxyURL,
-		"patrol_proxy_set":         cfg.PatrolProxyURL != "",
+		"ok":                         true,
+		"persisted":                  true,
+		"patrol_enabled":             cfg.PatrolEnabled,
+		"patrol_interval":            cfg.PatrolInterval,
+		"patrol_recheck_cooldowns":   cfg.PatrolRecheckCooldowns,
+		"quota_usage_cooldown_ratio": cfg.QuotaUsageCooldownRatio,
+		"patrol_timeout":             cfg.PatrolTimeout,
+		"patrol_auth_dir":            cfg.PatrolAuthDir,
+		"patrol_concurrency":         cfg.PatrolConcurrency,
+		"patrol_batch_size":          cfg.PatrolBatchSize,
+		"patrol_model":               cfg.PatrolModel,
+		"patrol_auto_model_switch":   cfg.PatrolAutoModelSwitch,
+		"patrol_initial_delay_sec":   cfg.PatrolInitialDelaySec,
+		"patrol_proxy_url":           cfg.PatrolProxyURL,
+		"patrol_proxy_set":           cfg.PatrolProxyURL != "",
 	})
 }
-
 
 func patrolModelsResponse() ([]byte, error) {
 	g := guard()
@@ -1202,7 +1214,6 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
-
 
 func htmlUnescapeBasic(s string) string {
 	replacer := strings.NewReplacer(

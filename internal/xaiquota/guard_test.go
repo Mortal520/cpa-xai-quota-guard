@@ -1,6 +1,7 @@
 package xaiquota
 
 import (
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -220,6 +221,107 @@ func TestGuardRecordsSuccessUsageTokens(t *testing.T) {
 		t.Fatalf("disabled still counted: %+v", st)
 	}
 }
+
+func TestGuardCoolsSuccessfulAccountAtUsageRatioThreshold(t *testing.T) {
+	auth := newMemAuth(AuthFile{AuthIndex: "ratio-90", Name: "ratio-90.json", Provider: "xai"})
+	g, err := NewGuard(Config{
+		Enabled:                 true,
+		QuotaUsageCooldownRatio: 0.90,
+	}, auth, &memLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g.HandleUsage(UsageEvent{
+		AuthIndex:  "ratio-90",
+		Provider:   "xai",
+		StatusCode: http.StatusOK,
+		ResponseHeaders: map[string][]string{
+			"X-Ratelimit-Limit-Tokens":     {"1000000"},
+			"X-Ratelimit-Remaining-Tokens": {"100000"},
+		},
+	})
+
+	files, _ := auth.List()
+	if len(files) != 1 || !files[0].Disabled {
+		t.Fatalf("达到 90%% 阈值后应停用: %+v", files)
+	}
+	rec := g.storeGet("ratio-90")
+	if rec == nil || rec.Signal != "usage_ratio_threshold" || rec.State != StateAutoDisabled {
+		t.Fatalf("阈值冷却状态错误: %+v", rec)
+	}
+	remain := time.Until(time.UnixMilli(rec.RecoverAtMS))
+	if remain < 23*time.Hour || remain > 24*time.Hour+time.Minute {
+		t.Fatalf("恢复时间应约为 24h，实际 %v", remain)
+	}
+}
+
+func TestGuardCapacityErrorNeverUsesRatioThreshold(t *testing.T) {
+	auth := newMemAuth(AuthFile{AuthIndex: "capacity", Name: "capacity.json", Provider: "xai"})
+	g, err := NewGuard(Config{Enabled: true, QuotaUsageCooldownRatio: 0.80}, auth, &memLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.HandleUsage(UsageEvent{
+		AuthIndex:  "capacity",
+		Provider:   "xai",
+		Failed:     true,
+		StatusCode: http.StatusTooManyRequests,
+		Body:       `{"code":"resource-exhausted","error":"The model is currently at capacity due to high demand"}`,
+		ResponseHeaders: map[string][]string{
+			"X-Ratelimit-Limit-Tokens":     {"1000000"},
+			"X-Ratelimit-Remaining-Tokens": {"0"},
+		},
+	})
+	files, _ := auth.List()
+	if len(files) != 1 || files[0].Disabled {
+		t.Fatalf("平台高负载不得触发阈值冷却: %+v", files)
+	}
+}
+
+func TestGuardUsageRatioThresholdDoesNotRestartCooldown(t *testing.T) {
+	auth := newMemAuth(AuthFile{AuthIndex: "ratio-repeat", Name: "ratio-repeat.json", Provider: "xai"})
+	g, err := NewGuard(Config{Enabled: true, QuotaUsageCooldownRatio: 0.90}, auth, &memLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := UsageEvent{
+		AuthIndex: "ratio-repeat", Provider: "xai", StatusCode: http.StatusOK,
+		ResponseHeaders: map[string][]string{
+			"X-Ratelimit-Limit-Tokens": {"1000000"}, "X-Ratelimit-Remaining-Tokens": {"0"},
+		},
+	}
+	g.HandleUsage(ev)
+	first := g.storeGet("ratio-repeat")
+	if first == nil {
+		t.Fatal("首次阈值冷却未落盘")
+	}
+	firstRecoverAt := first.RecoverAtMS
+	time.Sleep(2 * time.Millisecond)
+	g.HandleUsage(ev)
+	second := g.storeGet("ratio-repeat")
+	if second == nil || second.RecoverAtMS != firstRecoverAt {
+		t.Fatalf("重复命中不得后推 24h: first=%d second=%+v", firstRecoverAt, second)
+	}
+}
+
+func TestGuardUsageRatioThresholdRespectsManualDisable(t *testing.T) {
+	auth := newMemAuth(AuthFile{AuthIndex: "ratio-manual", Name: "ratio-manual.json", Provider: "xai", Disabled: true})
+	g, err := NewGuard(Config{Enabled: true, QuotaUsageCooldownRatio: 0.90}, auth, &memLog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.HandleUsage(UsageEvent{
+		AuthIndex: "ratio-manual", Provider: "xai", StatusCode: http.StatusOK,
+		ResponseHeaders: map[string][]string{
+			"X-Ratelimit-Limit-Tokens": {"1000000"}, "X-Ratelimit-Remaining-Tokens": {"0"},
+		},
+	})
+	rec := g.storeGet("ratio-manual")
+	if rec == nil || rec.State != StateUserManualDisabled || rec.DisableSource != SourceUserManual {
+		t.Fatalf("手动停用不得被阈值冷却夺权: %+v", rec)
+	}
+}
 func TestGuardDeletesInvalidCredentials401(t *testing.T) {
 	auth := newMemAuth(AuthFile{AuthIndex: "x401", Name: "xai-401.json", Provider: "xai", Disabled: false})
 	g, err := NewGuard(Config{
@@ -246,10 +348,10 @@ func TestGuardDeletesInvalidCredentials401(t *testing.T) {
 func TestGuardCooldownsSpendingLimit402(t *testing.T) {
 	auth := newMemAuth(AuthFile{AuthIndex: "x402", Name: "xai-402.json", Provider: "xai", Disabled: false})
 	g, err := NewGuard(Config{
-		Enabled:              true,
-		ManagementURL:        "http://127.0.0.1:8317",
-		ManagementKey:        "test",
-		SpendingConfirmHits:  3,
+		Enabled:                  true,
+		ManagementURL:            "http://127.0.0.1:8317",
+		ManagementKey:            "test",
+		SpendingConfirmHits:      3,
 		SpendingConfirmWindowSec: 900,
 	}, auth, &memLog{})
 	if err != nil {
@@ -398,7 +500,7 @@ func TestTickHealsOrphanActiveWhileCPADisabled(t *testing.T) {
 		DisableSource: SourceNone, State: StateActive,
 		LastCooldownSignal: "free_usage", LastCooldownReason: "quota",
 		LastCooldownDisabledAtMS: now.Add(-25 * time.Hour).UnixMilli(),
-		LastCooldownRecoverAtMS: now.Add(-time.Hour).UnixMilli(),
+		LastCooldownRecoverAtMS:  now.Add(-time.Hour).UnixMilli(),
 	})
 	g.Tick()
 	files, _ := auth.List()
@@ -417,9 +519,9 @@ func TestTickRestoresLostPluginAutoBeforeDue(t *testing.T) {
 	_ = g.storeUpsert(AccountRecord{
 		AuthIndex: "lost1", FileName: "xai-lost.json", Provider: "xai",
 		DisableSource: SourceNone, State: StateActive,
-		LastCooldownSignal: "spending_limit",
+		LastCooldownSignal:       "spending_limit",
 		LastCooldownDisabledAtMS: now.Add(-1 * time.Hour).UnixMilli(),
-		LastCooldownRecoverAtMS: now.Add(2 * time.Hour).UnixMilli(),
+		LastCooldownRecoverAtMS:  now.Add(2 * time.Hour).UnixMilli(),
 	})
 	g.Tick()
 	files, _ := auth.List()
@@ -431,4 +533,3 @@ func TestTickRestoresLostPluginAutoBeforeDue(t *testing.T) {
 		t.Fatalf("expected restored plugin_auto ownership, got %#v", rec)
 	}
 }
-

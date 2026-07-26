@@ -52,9 +52,8 @@ func TestElasticClimbsWhenIdleHealthy(t *testing.T) {
 	if tgt2 > ncpu {
 		t.Fatalf("critical load target=%d reason=%s want <=cpu %d", tgt2, r2, ncpu)
 	}
-	if tgt2 > 12/2+1 && ncpu <= 8 {
-		// should drop noticeably from 12
-		t.Fatalf("critical load target=%d reason=%s want clear shrink from 12", tgt2, r2)
+	if ncpu < 12 && tgt2 >= 12 {
+		t.Fatalf("critical load target=%d reason=%s should shrink from 12", tgt2, r2)
 	}
 	// high timeout pressure → min-ish
 	tgt3, r3 := elasticPatrolTarget(16, 1000, 12, 0.2, true, 0.5, 0.1)

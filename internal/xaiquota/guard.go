@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -22,6 +23,9 @@ type Config struct {
 	MinResetSeconds float64
 	// IncludeUnobservedQuotaEst adds unobserved xAI accounts * DefaultFreeLimit into quota_total_est.
 	IncludeUnobservedQuotaEst bool
+	// QuotaUsageCooldownRatio soft-disables an account for 24h when actual/limit reaches
+	// this ratio. 0 disables the feature; values above 1 (100%) are supported.
+	QuotaUsageCooldownRatio float64
 	// CPAMP integration (optional backfill / deep link).
 	CPAMPURL      string
 	CPAMPAdminKey string
@@ -29,13 +33,16 @@ type Config struct {
 	WebhookURL string
 
 	// Patrol (proactive credential sweep).
-	PatrolEnabled   bool
-	PatrolInterval  float64
-	PatrolTimeout   float64
-	PatrolBatchSize int
-	PatrolAuthDir     string
-	PatrolProxyURL   string
-	PatrolConcurrency int
+	PatrolEnabled  bool
+	PatrolInterval float64
+	// PatrolRecheckCooldowns makes scheduled sweeps include plugin-owned disabled
+	// cooldowns so accounts can recover before the 24h fallback deadline.
+	PatrolRecheckCooldowns bool
+	PatrolTimeout          float64
+	PatrolBatchSize        int
+	PatrolAuthDir          string
+	PatrolProxyURL         string
+	PatrolConcurrency      int
 	// PatrolModel is the primary upstream model id used for credential probes.
 	// Prefer free-tier models (e.g. grok-4.5-build-free); paid models may false-positive as spending-limit.
 	PatrolModel string
@@ -50,7 +57,6 @@ type Config struct {
 	SpendingConfirmHits int
 	// SpendingConfirmWindowSec: hits outside this window reset the counter (0=use 900s).
 	SpendingConfirmWindowSec float64
-
 }
 
 // Defaults returns safe defaults. enabled=false until configured.
@@ -62,16 +68,17 @@ func Defaults() Config {
 		MaxResetSeconds:           86400,
 		MinResetSeconds:           0,
 		IncludeUnobservedQuotaEst: true,
-			PatrolEnabled:    false,
-			PatrolInterval:   3600,
-			PatrolTimeout:    15,
-			PatrolBatchSize:  0,
-			PatrolAuthDir:    "",
-			PatrolProxyURL:    "",
-			PatrolConcurrency: 24,
-			PatrolModel:            DefaultPatrolModel,
-			PatrolAutoModelSwitch:  false,
-			PatrolInitialDelaySec:  60,
+		PatrolEnabled:             false,
+		PatrolInterval:            3600,
+		PatrolRecheckCooldowns:    true,
+		PatrolTimeout:             15,
+		PatrolBatchSize:           0,
+		PatrolAuthDir:             "",
+		PatrolProxyURL:            "",
+		PatrolConcurrency:         24,
+		PatrolModel:               DefaultPatrolModel,
+		PatrolAutoModelSwitch:     false,
+		PatrolInitialDelaySec:     60,
 		SpendingConfirmHits:       3,
 		SpendingConfirmWindowSec:  900,
 	}
@@ -86,13 +93,13 @@ type AuthFileLookup interface {
 
 // AuthFile is the management API subset we need.
 type AuthFile struct {
-	AuthIndex   string
-	Name        string
-	Provider    string
-	Account     string
-	Disabled    bool
-	Success     int64
-	Failed      int64
+	AuthIndex string
+	Name      string
+	Provider  string
+	Account   string
+	Disabled  bool
+	Success   int64
+	Failed    int64
 	// Optional metadata for Free/Super/Heavy classification (from CPA auth-files list).
 	Note        string
 	Label       string
@@ -132,9 +139,9 @@ type Guard struct {
 	auth   AuthFileLookup
 	logger Logger
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
-	patrol patrolState
+	stopCh     chan struct{}
+	wg         sync.WaitGroup
+	patrol     patrolState
 	patrolHTTP patrolHTTP
 }
 
@@ -175,6 +182,9 @@ func (g *Guard) ApplyConfig(cfg Config) {
 	}
 	if cfg.SpendingConfirmWindowSec <= 0 {
 		cfg.SpendingConfirmWindowSec = 900
+	}
+	if cfg.QuotaUsageCooldownRatio < 0 || math.IsNaN(cfg.QuotaUsageCooldownRatio) || math.IsInf(cfg.QuotaUsageCooldownRatio, 0) {
+		cfg.QuotaUsageCooldownRatio = 0
 	}
 	// Reload store if path changed.
 	if g.store == nil || g.store.Path() != cfg.StatePath {
@@ -247,7 +257,7 @@ func (g *Guard) tickerLoop() {
 		g.Tick()
 
 		// Patrol scheduling
-		if cfg.PatrolEnabled && cfg.PatrolAuthDir != "" {
+		if cfg.PatrolEnabled {
 			patrolInterval := time.Duration(cfg.PatrolInterval) * time.Second
 			if patrolInterval <= 0 {
 				patrolInterval = 3600 * time.Second
@@ -267,7 +277,11 @@ func (g *Guard) tickerLoop() {
 			if !patrolNext.IsZero() && !now.Before(patrolNext) {
 				g.logf("info", "patrol 定时巡查触发 interval=%v next≈%v", patrolInterval, now.Add(patrolInterval).Format("15:04:05"))
 				patrolNext = now.Add(patrolInterval)
-				go g.PatrolSweep(PatrolOptions{Scope: "all"})
+				scope := "all"
+				if cfg.PatrolRecheckCooldowns {
+					scope = "scheduled"
+				}
+				go g.PatrolSweep(PatrolOptions{Scope: scope})
 			}
 		}
 		g.mu.Lock()
@@ -299,6 +313,7 @@ func (g *Guard) HandleUsage(ev UsageEvent) {
 	if !ev.Failed {
 		// Successful traffic clears pending 402 confirm counter.
 		_ = g.clearSpendingSuspect(trim(ev.AuthIndex))
+		g.maybeCooldownForUsageRatio(ev, cfg)
 		return
 	}
 	authIndex := trim(ev.AuthIndex)
@@ -530,22 +545,22 @@ func (g *Guard) disableForMatch(authIndex string, ev UsageEvent, match MatchResu
 
 	nowMS := time.Now().UnixMilli()
 	rec := AccountRecord{
-		AuthIndex:     authIndex,
-		FileName:      current.Name,
-		Provider:      "xai",
-		Account:       firstNonEmpty(ev.Account, current.Account),
-		DisableSource: SourcePluginAuto,
-		State:         StateAutoDisabled,
-		SpendingSuspectHits: 0,
+		AuthIndex:              authIndex,
+		FileName:               current.Name,
+		Provider:               "xai",
+		Account:                firstNonEmpty(ev.Account, current.Account),
+		DisableSource:          SourcePluginAuto,
+		State:                  StateAutoDisabled,
+		SpendingSuspectHits:    0,
 		SpendingSuspectFirstMS: 0,
-		SpendingSuspectLastMS: 0,
-		RecoverAtMS:   match.RecoverAt.UnixMilli(),
-		DisabledAtMS:  nowMS,
-		PreDisabled:   false,
-		Owner:         Owner,
-		Reason:        match.Reason,
-		Signal:        match.Signal,
-		LastEventHash: ev.EventHash,
+		SpendingSuspectLastMS:  0,
+		RecoverAtMS:            match.RecoverAt.UnixMilli(),
+		DisabledAtMS:           nowMS,
+		PreDisabled:            false,
+		Owner:                  Owner,
+		Reason:                 match.Reason,
+		Signal:                 match.Signal,
+		LastEventHash:          ev.EventHash,
 	}
 	if err := g.storeUpsert(rec); err != nil {
 		g.logf("error", "写状态失败 auth=%s: %v", authIndex, err)
@@ -805,16 +820,41 @@ func (g *Guard) observeQuotaFromEvent(ev UsageEvent) {
 	if authIndex == "" || g.store == nil {
 		return
 	}
-	now := time.Now()
-	if actual, limit, ok := ParseFreeUsageTokens(ev.Body); ok {
-		_ = g.store.ObserveFreeQuotaSource(authIndex, actual, limit, now, QuotaSourceFreeUsageBody)
-		return
+	actual, limit, source, ok := quotaUsageFromEvent(ev)
+	if ok {
+		_ = g.store.ObserveFreeQuotaSource(authIndex, actual, limit, time.Now(), source)
+	}
+}
+
+func quotaUsageFromEvent(ev UsageEvent) (actual, limit int64, source string, ok bool) {
+	if actual, limit, ok = ParseFreeUsageTokens(ev.Body); ok {
+		return actual, limit, QuotaSourceFreeUsageBody, true
 	}
 	h := headerFromMap(ev.ResponseHeaders)
-	if limit, remaining, ok := ParseRateLimitTokenHeaders(h); ok {
-		actual := ActualFromLimitRemaining(limit, remaining)
-		_ = g.store.ObserveFreeQuotaSource(authIndex, actual, limit, now, QuotaSourceRateLimitHdr)
+	if limit, remaining, found := ParseRateLimitTokenHeaders(h); found {
+		return ActualFromLimitRemaining(limit, remaining), limit, QuotaSourceRateLimitHdr, true
 	}
+	return 0, 0, "", false
+}
+
+func (g *Guard) maybeCooldownForUsageRatio(ev UsageEvent, cfg Config) bool {
+	if cfg.QuotaUsageCooldownRatio <= 0 || trim(ev.AuthIndex) == "" {
+		return false
+	}
+	match, ok := MatchUsageRatioThresholdFromEvent(ev, cfg.QuotaUsageCooldownRatio, time.Now())
+	if !ok {
+		return false
+	}
+	g.disableForMatch(trim(ev.AuthIndex), ev, match)
+	return true
+}
+
+func MatchUsageRatioThresholdFromEvent(ev UsageEvent, threshold float64, now time.Time) (MatchResult, bool) {
+	actual, limit, _, ok := quotaUsageFromEvent(ev)
+	if !ok {
+		return MatchResult{}, false
+	}
+	return MatchUsageRatioThreshold(actual, limit, threshold, now)
 }
 
 func (g *Guard) ObserveQuota(authIndex string, actual, limit int64) {
@@ -882,7 +922,6 @@ func (g *Guard) PruneQuotaSnapshots(liveAuth map[string]bool) (int, error) {
 	return g.store.PruneQuotaSnapshots(liveAuth)
 }
 
-
 // UsageAndQuotaMaps returns one-shot usage/quota maps (single store read).
 func (g *Guard) UsageAndQuotaMaps() (map[string]AccountUsageSnapshot, map[string]*AccountQuotaSnapshot) {
 	st := UsageStats{}
@@ -945,7 +984,6 @@ func (g *Guard) findAuth(authIndex string) (*AuthFile, error) {
 	}
 	return nil, nil
 }
-
 
 // noteSpendingSuspect records a 402 spending-limit observation. Returns hits in current window.
 func (g *Guard) noteSpendingSuspect(authIndex string, ev UsageEvent, now time.Time, windowSec float64) (hits int, firstMS, lastMS int64) {
@@ -1186,15 +1224,15 @@ func (g *Guard) BackfillFromCPAMP(ctx context.Context) (map[string]any, error) {
 		}
 	}
 	return map[string]any{
-		"source":         "cpamp_analytics",
-		"day_key":        DayKeyShanghai(now),
-		"from_ms":        fromMS,
-		"to_ms":          toMS,
-		"cpamp_tokens":   sum.TotalTokens,
-		"cpamp_calls":    sum.TotalCalls,
-		"cpamp_success":  sum.SuccessCalls,
-		"cpamp_failure":  sum.FailureCalls,
-		"applied":        applied,
+		"source":        "cpamp_analytics",
+		"day_key":       DayKeyShanghai(now),
+		"from_ms":       fromMS,
+		"to_ms":         toMS,
+		"cpamp_tokens":  sum.TotalTokens,
+		"cpamp_calls":   sum.TotalCalls,
+		"cpamp_success": sum.SuccessCalls,
+		"cpamp_failure": sum.FailureCalls,
+		"applied":       applied,
 	}, nil
 }
 
@@ -1205,9 +1243,9 @@ func (g *Guard) NotifyWebhook(event string, fields map[string]any) {
 		return
 	}
 	payload := map[string]any{
-		"plugin":    "cpa-xai-quota-guard",
-		"event":     event,
-		"ts_ms":     time.Now().UnixMilli(),
+		"plugin": "cpa-xai-quota-guard",
+		"event":  event,
+		"ts_ms":  time.Now().UnixMilli(),
 	}
 	for k, v := range fields {
 		payload[k] = v
@@ -1249,26 +1287,25 @@ func (g *Guard) HealthCheck() map[string]any {
 	}
 	detailOK := st.ZeroTokenStreak < ZeroTokenAlertThreshold
 	return map[string]any{
-		"enabled":                 cfg.Enabled,
-		"management_configured":   mgmtOK,
-		"auth_list_ok":            authOK,
-		"auth_list_error":         authErr,
-		"xai_auth_files":          xaiN,
-		"state_path":              cfg.StatePath,
-		"usage_day_key":           st.DayKey,
-		"used_today":              st.UsedToday,
-		"requests_today":          st.RequestsToday,
-		"zero_token_streak":       st.ZeroTokenStreak,
-		"detail_tokens_healthy":   detailOK,
-		"cpamp_configured":        strings.TrimSpace(cfg.CPAMPURL) != "" && strings.TrimSpace(cfg.CPAMPAdminKey) != "",
-		"webhook_configured":      strings.TrimSpace(cfg.WebhookURL) != "",
-		"include_unobserved_est":  cfg.IncludeUnobservedQuotaEst,
-		"min_reset_seconds":       cfg.MinResetSeconds,
-		"max_reset_seconds":       cfg.MaxResetSeconds,
-		"ok":                      cfg.Enabled && mgmtOK && authOK && detailOK,
+		"enabled":                cfg.Enabled,
+		"management_configured":  mgmtOK,
+		"auth_list_ok":           authOK,
+		"auth_list_error":        authErr,
+		"xai_auth_files":         xaiN,
+		"state_path":             cfg.StatePath,
+		"usage_day_key":          st.DayKey,
+		"used_today":             st.UsedToday,
+		"requests_today":         st.RequestsToday,
+		"zero_token_streak":      st.ZeroTokenStreak,
+		"detail_tokens_healthy":  detailOK,
+		"cpamp_configured":       strings.TrimSpace(cfg.CPAMPURL) != "" && strings.TrimSpace(cfg.CPAMPAdminKey) != "",
+		"webhook_configured":     strings.TrimSpace(cfg.WebhookURL) != "",
+		"include_unobserved_est": cfg.IncludeUnobservedQuotaEst,
+		"min_reset_seconds":      cfg.MinResetSeconds,
+		"max_reset_seconds":      cfg.MaxResetSeconds,
+		"ok":                     cfg.Enabled && mgmtOK && authOK && detailOK,
 	}
 }
-
 
 func (g *Guard) UsageByAuthMap() map[string]AccountUsageSnapshot {
 	st := UsageStats{}

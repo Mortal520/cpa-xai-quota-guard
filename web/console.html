@@ -106,7 +106,7 @@ button.off:hover{background:var(--btn-off-hover)}
 .status-dot.off{background:var(--err);box-shadow:0 0 0 3px color-mix(in srgb,var(--err) 25%,transparent)}
 .badge.muted{background:var(--chip);color:var(--muted);border-color:var(--border)}
 .grid{display:grid;gap:1rem}
-.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 1px 3px var(--shadow)}
+.card{min-width:0;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 1px 3px var(--shadow)}
 .row{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}
 .stats-wrap{display:grid;gap:.85rem;margin-top:.9rem}
 .stats-group{background:linear-gradient(180deg,var(--card2) 0%,var(--card) 100%);border:1px solid var(--border);border-radius:12px;padding:.7rem .75rem .85rem}
@@ -327,11 +327,14 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
   </div>
   <div class="card" id="patrolCard">
     <div class="row" style="justify-content:space-between;gap:.5rem;margin-bottom:.35rem">
-      <div><div class="card-title">主动巡查</div><div class="card-desc" id="patrolHint">全量只扫「已启用」；仅复核只扫「程序自动冷却」。并发在用户上限内按负载/探测健康弹性伸缩。</div></div>
+      <div><div class="card-title">主动巡查</div><div class="card-desc" id="patrolHint">手动全量只扫「已启用」；手动复核只扫「程序自动冷却」；定时任务可综合处理两者。手动停用始终跳过。</div></div>
     </div>
     <div class="row" style="gap:.6rem;flex-wrap:wrap;align-items:center">
       <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem">
         <input type="checkbox" id="cfgPatrolEn" style="width:auto"> 启用定时巡查
+      </label>
+      <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem" title="定时综合巡查会复查本插件自动冷却的账号；探测已恢复时提前启用，手动停用账号永不参与">
+        <input type="checkbox" id="cfgPatrolRecheck" style="width:auto"> 定时复查冷却号
       </label>
       <label style="font-size:.85rem">周期(分钟)
         <input id="cfgPatrolInt" type="number" min="1" step="1" style="width:80px" placeholder="60" title="保存时换算为秒">
@@ -347,6 +350,9 @@ table.acc tbody tr.row-manual{background:var(--row-manual-bg)}
       </label>
       <label style="font-size:.85rem">每轮上限(0=不限·默认)
         <input id="cfgPatrolBatch" type="number" min="0" step="1" style="width:60px" placeholder="0">
+      </label>
+      <label style="font-size:.85rem" title="根据账号实测 actual/limit 或 X-Ratelimit Remaining 计算；达到后自动停用 24 小时。0=关闭，允许设置 120 等超额阈值">额度冷却阈值(%)
+        <input id="cfgQuotaRatio" type="number" min="0" step="1" style="width:76px" placeholder="0">
       </label>
       <button class="primary" onclick="savePatrolConfig()">保存配置</button>
     </div>
@@ -1734,6 +1740,7 @@ async function loadState(opts){
       window._PATROL_FORCE_FORM = false;
       if(!PATROL_CFG_APPLIED || (forceForm && !PATROL_FORM_DIRTY)){
         document.getElementById("cfgPatrolEn").checked = !!pen;
+        document.getElementById("cfgPatrolRecheck").checked = cfg.patrol_recheck_cooldowns !== false;
         document.getElementById("cfgPatrolInt").value = Math.max(1, Math.round((Number(cfg.patrol_interval)||3600)/60));
         document.getElementById("cfgPatrolTO").value = cfg.patrol_timeout || 15;
       var elDelay = document.getElementById("cfgPatrolInitDelay");
@@ -1741,6 +1748,7 @@ async function loadState(opts){
         document.getElementById("cfgPatrolDir").value = cfg.patrol_auth_dir || "";
         document.getElementById("cfgPatrolCon").value = cfg.patrol_concurrency || 24;
         document.getElementById("cfgPatrolBatch").value = (cfg.patrol_batch_size != null ? cfg.patrol_batch_size : 0);
+        document.getElementById("cfgQuotaRatio").value = Math.round((Number(cfg.quota_usage_cooldown_ratio)||0)*10000)/100;
         var pm = (window._PATROL_UI_MODEL || cfg.patrol_model || "grok-4.5");
         // force-reload uses server; normal first fill prefers server unless UI memory exists from same page session
         if(forceForm){ pm = cfg.patrol_model || "grok-4.5"; }
@@ -1781,6 +1789,8 @@ async function loadState(opts){
       var curProxy = (document.getElementById("cfgPatrolProxy")||{}).value || "";
       ph.textContent = (PATROL_FORM_DIRTY?"[未保存] ":"") + ((document.getElementById("cfgPatrolEn")||{}).checked ? "定时巡查开":"定时巡查关")
         + " · 周期"+(document.getElementById("cfgPatrolInt").value||Math.round((cfg.patrol_interval||3600)/60)||"?")+"分钟"
+        + " · 冷却复查"+((document.getElementById("cfgPatrolRecheck")||{}).checked?"开":"关")
+        + " · 额度阈值"+((document.getElementById("cfgQuotaRatio")||{}).value||"0")+"%"
         + " · 并发上限(弹性)"+(document.getElementById("cfgPatrolCon").value||cfg.patrol_concurrency||"?")
         + " · 模型"+curModel
         + " · 自动换模"+((document.getElementById("cfgPatrolAutoModel")||{}).checked?"开":"关")
@@ -1983,6 +1993,8 @@ async function refreshPatrolModels(silent){
 async function savePatrolConfig(){
   var body = {
     patrol_enabled: document.getElementById("cfgPatrolEn").checked,
+    patrol_recheck_cooldowns: document.getElementById("cfgPatrolRecheck").checked,
+    quota_usage_cooldown_ratio: Math.max(0, Number(document.getElementById("cfgQuotaRatio").value)||0)/100,
     patrol_interval: Math.max(60, Math.round((Number(document.getElementById("cfgPatrolInt").value)||60)*60)),
     patrol_timeout: Number(document.getElementById("cfgPatrolTO").value)||15,
       patrol_initial_delay_sec: Math.max(0, Number((document.getElementById("cfgPatrolInitDelay")||{}).value)||0),
@@ -2012,11 +2024,13 @@ async function savePatrolConfig(){
       if(res.patrol_proxy_url != null){ document.getElementById("cfgPatrolProxy").value = res.patrol_proxy_url || ""; window._PATROL_UI_PROXY = res.patrol_proxy_url || ""; window._PATROL_UI_PROXY_SET = true; }
       if(res.patrol_batch_size != null){ document.getElementById("cfgPatrolBatch").value = res.patrol_batch_size; }
       if(res.patrol_enabled != null){ document.getElementById("cfgPatrolEn").checked = !!res.patrol_enabled; }
+      if(res.patrol_recheck_cooldowns != null){ document.getElementById("cfgPatrolRecheck").checked = !!res.patrol_recheck_cooldowns; }
+      if(res.quota_usage_cooldown_ratio != null){ document.getElementById("cfgQuotaRatio").value = Math.round(Number(res.quota_usage_cooldown_ratio)*10000)/100; }
       if(res.patrol_auto_model_switch != null){ document.getElementById("cfgPatrolAutoModel").checked = !!res.patrol_auto_model_switch; }
     }
     PATROL_FORM_DIRTY = false;
     PATROL_CFG_APPLIED = true; // keep form as-is (already echoed from res); loadState will NOT rewrite
-    if(ph) ph.textContent = "已保存 · " + (body.patrol_enabled?"定时开":"定时关") + " · 周期"+Math.round((Number(body.patrol_interval)||0)/60)+"分钟(="+body.patrol_interval+"s)"+"s" + " · 并发上限"+body.patrol_concurrency + " · 模型"+(body.patrol_model||"") + " · 代理"+(body.patrol_proxy_url?"已设":"无") + " · 每轮"+(body.patrol_batch_size||0) + " · 自动换模"+(body.patrol_auto_model_switch?"开":"关");
+    if(ph) ph.textContent = "已保存 · " + (body.patrol_enabled?"定时开":"定时关") + " · 周期"+Math.round((Number(body.patrol_interval)||0)/60)+"分钟" + " · 冷却复查"+(body.patrol_recheck_cooldowns?"开":"关") + " · 额度阈值"+(Math.round((Number(body.quota_usage_cooldown_ratio)||0)*10000)/100)+"%" + " · 并发上限"+body.patrol_concurrency + " · 模型"+(body.patrol_model||"") + " · 代理"+(body.patrol_proxy_url?"已设":"无") + " · 每轮"+(body.patrol_batch_size||0) + " · 自动换模"+(body.patrol_auto_model_switch?"开":"关");
     // refresh accounts/metrics only — form locked by PATROL_CFG_APPLIED
     loadState();
   } catch(e){
@@ -2034,7 +2048,7 @@ function markPatrolFormDirty(){
   }catch(e){}
 }
 function bindPatrolFormDirty(){
-  ["cfgPatrolEn","cfgPatrolInt","cfgPatrolTO","cfgPatrolDir","cfgPatrolCon","cfgPatrolBatch","cfgPatrolModel","cfgPatrolAutoModel","cfgPatrolProxy"].forEach(function(id){
+  ["cfgPatrolEn","cfgPatrolRecheck","cfgQuotaRatio","cfgPatrolInt","cfgPatrolTO","cfgPatrolDir","cfgPatrolCon","cfgPatrolBatch","cfgPatrolModel","cfgPatrolAutoModel","cfgPatrolProxy"].forEach(function(id){
     var el = document.getElementById(id);
     if(!el || el._dirtyBound) return;
     el._dirtyBound = true;
@@ -2454,7 +2468,7 @@ function paintPatrol(p, r){
     var errRaw = (p.last_error||"").trim();
     var err = errRaw ? ("⚠ " + errRaw) : "";
     var aborted = !!errRaw && (errRaw.indexOf("中止")>=0 || errRaw.indexOf("连通")>=0 || errRaw.indexOf("网络")>=0 || errRaw.indexOf("代理")>=0);
-    var scope = p.scope ? (p.scope==="spending_only"?"冷却复核":"全量启用") : "";
+    var scope = p.scope ? (p.scope==="spending_only"?"冷却复核":(p.scope==="scheduled"?"定时综合":"全量启用")) : "";
     if(probed===0 && !p.started_at_ms && !p.completed_at_ms){
       line1 = "空闲 · 等待手动/定时巡查";
       line2 = thr ? ("上次并发 " + thr) : "";

@@ -1,6 +1,6 @@
 # 安装 / 升级 / 卸载
 
-> 当前稳定实现版本：**0.3.13**（见 [CHANGELOG](../CHANGELOG.md)）。商店/脚本安装以 GitHub Release 资产为准。
+> 当前稳定实现版本：**0.3.32**（见 [CHANGELOG](../CHANGELOG.md)）。商店/脚本安装以 GitHub Release 资产为准。
 
 插件 ID：`cpa-xai-quota-guard`  
 当前版本以 `main.go` 的 `pluginVer` 与 [registry.json](../registry.json) 为准。
@@ -58,6 +58,8 @@ plugins:
       management_key: "<CPA_MANAGEMENT_KEY>"
       state_path: "data/cpa-xai-quota-guard-state.json"
       patrol_auth_dir: "/root/.cli-proxy-api"   # 按实际 auth 目录改
+      patrol_recheck_cooldowns: true
+      quota_usage_cooldown_ratio: 0             # 0=关；0.9=90%；1.2=120%
 ```
 
 ### 2. 重启 CPA
@@ -71,7 +73,7 @@ plugins:
 ```bash
 curl -X POST \
   -H "Authorization: Bearer <CPA_MANAGEMENT_KEY>" \
-  "http://<CPA_HOST>:<PORT>/v0/management/plugin-store/cpa-xai-quota-guard/install?source=<SOURCE_ID>&version=0.3.10"
+  "http://<CPA_HOST>:<PORT>/v0/management/plugin-store/cpa-xai-quota-guard/install?source=<SOURCE_ID>&version=0.3.32"
 ```
 
 > 商店安装依赖 CPA 能拉取 GitHub Release 资产。若机器无法访问 GitHub，改用方式 B/C。
@@ -107,7 +109,7 @@ plugins:
 Release zip 下载也可同样加前缀，例如：
 
 ```text
-https://ghproxy.com/https://github.com/Mortal520/cpa-xai-quota-guard/releases/download/v0.3.10/cpa-xai-quota-guard_0.3.10_linux_amd64.zip
+https://ghproxy.com/https://github.com/Mortal520/cpa-xai-quota-guard/releases/download/v0.3.32/cpa-xai-quota-guard_0.3.32_linux_amd64.zip
 ```
 
 > 加速域名仅为网络可达性方案，**不改变**插件校验与版本语义；密钥仍只写本地配置。

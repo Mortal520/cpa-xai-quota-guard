@@ -219,7 +219,6 @@ func TestIsInvalidCredentials(t *testing.T) {
 	}
 }
 
-
 func TestIsSpendingLimitBlocked(t *testing.T) {
 	body := `{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok."}`
 	if !IsSpendingLimitBlocked(402, body) {
@@ -270,8 +269,6 @@ func TestMatchSpendingLimitQuotaDistinctFrom429(t *testing.T) {
 	}
 }
 
-
-
 func TestRegionPermissionDeniedNotDead(t *testing.T) {
 	body := `{"code":"permission-denied","error":"The model grok-4.5 is not available in your region."}`
 	if !IsModelRegionUnavailable(403, body) {
@@ -288,7 +285,6 @@ func TestRegionPermissionDeniedNotDead(t *testing.T) {
 		t.Fatal("endpoint permission-denied must remain dead")
 	}
 }
-
 
 func TestPlatformCapacityNotShortWindow(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
@@ -339,3 +335,22 @@ func TestIsPlatformCapacityExhaustedVariants(t *testing.T) {
 	}
 }
 
+func TestMatchUsageRatioThresholdAllowsOverLimit(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	got, ok := MatchUsageRatioThreshold(1_200_000, 1_000_000, 1.10, now)
+	if !ok {
+		t.Fatal("120% 用量达到 110% 阈值时应触发冷却")
+	}
+	if got.Signal != "usage_ratio_threshold" || !got.Soft {
+		t.Fatalf("match=%+v", got)
+	}
+	if got.RecoverAt != now.Add(24*time.Hour) {
+		t.Fatalf("RecoverAt=%s，期望首次触发后 24h", got.RecoverAt)
+	}
+	if _, ok := MatchUsageRatioThreshold(1_200_000, 1_000_000, 1.30, now); ok {
+		t.Fatal("120% 用量不应达到 130% 阈值")
+	}
+	if _, ok := MatchUsageRatioThreshold(1_200_000, 1_000_000, 0, now); ok {
+		t.Fatal("阈值 0 必须关闭该能力")
+	}
+}

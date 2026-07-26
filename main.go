@@ -68,7 +68,7 @@ import (
 
 const (
 	pluginID   = "cpa-xai-quota-guard"
-	pluginVer  = "0.3.31"
+	pluginVer  = "0.3.32"
 	pluginAuth = "@mortal"
 	pluginRepo = "https://github.com/mortal/cpa-xai-quota-guard"
 	pluginLogo = ""
@@ -153,9 +153,9 @@ func cgoHostCall(method string, request []byte) ([]byte, error) {
 }
 
 type envelope struct {
-	OK     bool             `json:"ok"`
-	Result json.RawMessage  `json:"result,omitempty"`
-	Error  *envelopeError   `json:"error,omitempty"`
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *envelopeError  `json:"error,omitempty"`
 }
 
 type envelopeError struct {
@@ -287,205 +287,14 @@ func pluginRegistration(request []byte) registration {
 	}
 }
 
-
 func handleUsageEvent(request []byte) ([]byte, error) {
 	if len(request) == 0 {
 		return okEnvelopeJSON("{}")
 	}
-	// Prefer typed decode first (exported field names from host json.Marshal).
-	var record pluginapi.UsageRecord
-	if err := json.Unmarshal(request, &record); err == nil {
-		ev := usageEventFromRecord(record)
-		// Fallback fill from raw map if typed detail is empty but raw has tokens.
-		if ev.TotalTokens <= 0 && (ev.InputTokens+ev.OutputTokens+ev.ReasoningTokens) <= 0 {
-			if rawEv, ok := usageEventFromRaw(request); ok {
-				if rawEv.TotalTokens > 0 || rawEv.InputTokens > 0 || rawEv.OutputTokens > 0 {
-					ev.InputTokens = rawEv.InputTokens
-					ev.OutputTokens = rawEv.OutputTokens
-					ev.ReasoningTokens = rawEv.ReasoningTokens
-					ev.TotalTokens = rawEv.TotalTokens
-				}
-				if ev.Body == "" && rawEv.Body != "" {
-					ev.Body = rawEv.Body
-					ev.StatusCode = rawEv.StatusCode
-					ev.Failed = rawEv.Failed
-				}
-				if ev.AuthIndex == "" {
-					ev.AuthIndex = rawEv.AuthIndex
-				}
-				if ev.Provider == "" {
-					ev.Provider = rawEv.Provider
-				}
-				if ev.AuthType == "" {
-					ev.AuthType = rawEv.AuthType
-				}
-			}
-		}
-		guard().HandleUsage(ev)
-		return okEnvelopeJSON("{}")
+	ev, ok := xaiquota.DecodeUsageEvent(request)
+	if !ok {
+		return errorEnvelope("decode_usage", "invalid usage payload"), nil
 	}
-	// Typed decode failed: raw path.
-	if ev, ok := usageEventFromRaw(request); ok {
-		guard().HandleUsage(ev)
-		return okEnvelopeJSON("{}")
-	}
-	return errorEnvelope("decode_usage", "invalid usage payload"), nil
-}
-
-func usageEventFromRecord(r pluginapi.UsageRecord) xaiquota.UsageEvent {
-	body := ""
-	status := 0
-	if r.Failed {
-		body = r.Failure.Body
-		status = r.Failure.StatusCode
-	}
-	var headers map[string][]string
-	if r.ResponseHeaders != nil {
-		headers = map[string][]string(r.ResponseHeaders)
-	}
-	total := r.Detail.TotalTokens
-	if total <= 0 {
-		total = r.Detail.InputTokens + r.Detail.OutputTokens + r.Detail.ReasoningTokens
-	}
-	return xaiquota.UsageEvent{
-		AuthIndex:       r.AuthIndex,
-		Provider:        r.Provider,
-		AuthType:        r.AuthType,
-		Account:         "",
-		Failed:          r.Failed,
-		StatusCode:      status,
-		Body:            body,
-		ResponseHeaders: headers,
-		InputTokens:     r.Detail.InputTokens,
-		OutputTokens:    r.Detail.OutputTokens,
-		ReasoningTokens: r.Detail.ReasoningTokens,
-		TotalTokens:     total,
-	}
-}
-
-func usageEventFromRaw(request []byte) (xaiquota.UsageEvent, bool) {
-	var raw map[string]any
-	if err := json.Unmarshal(request, &raw); err != nil || raw == nil {
-		return xaiquota.UsageEvent{}, false
-	}
-	getS := func(keys ...string) string {
-		for _, k := range keys {
-			if v, ok := raw[k]; ok {
-				switch t := v.(type) {
-				case string:
-					if t != "" {
-						return t
-					}
-				}
-			}
-		}
-		return ""
-	}
-	getB := func(keys ...string) bool {
-		for _, k := range keys {
-			if v, ok := raw[k]; ok {
-				switch t := v.(type) {
-				case bool:
-					return t
-				case float64:
-					return t != 0
-				}
-			}
-		}
-		return false
-	}
-	getI := func(m map[string]any, keys ...string) int64 {
-		if m == nil {
-			return 0
-		}
-		for _, k := range keys {
-			if v, ok := m[k]; ok {
-				switch t := v.(type) {
-				case float64:
-					return int64(t)
-				case int64:
-					return t
-				case json.Number:
-					n, _ := t.Int64()
-					return n
-				case string:
-					var n int64
-					fmt.Sscan(t, &n)
-					return n
-				}
-			}
-		}
-		return 0
-	}
-	failed := getB("Failed", "failed")
-	status := 0
-	body := ""
-	// Failure may be nested object
-	if f, ok := raw["Failure"].(map[string]any); ok {
-		status = int(getI(f, "StatusCode", "status_code", "statusCode"))
-		if s, ok := f["Body"].(string); ok {
-			body = s
-		} else if s, ok := f["body"].(string); ok {
-			body = s
-		}
-	}
-	if f, ok := raw["failure"].(map[string]any); ok {
-		if status == 0 {
-			status = int(getI(f, "StatusCode", "status_code", "statusCode"))
-		}
-		if body == "" {
-			if s, ok := f["Body"].(string); ok {
-				body = s
-			} else if s, ok := f["body"].(string); ok {
-				body = s
-			}
-		}
-	}
-	detail := map[string]any{}
-	if d, ok := raw["Detail"].(map[string]any); ok {
-		detail = d
-	} else if d, ok := raw["detail"].(map[string]any); ok {
-		detail = d
-	}
-	inTok := getI(detail, "InputTokens", "input_tokens", "inputTokens", "PromptTokens", "prompt_tokens")
-	outTok := getI(detail, "OutputTokens", "output_tokens", "outputTokens", "CompletionTokens", "completion_tokens")
-	reaTok := getI(detail, "ReasoningTokens", "reasoning_tokens", "reasoningTokens")
-	total := getI(detail, "TotalTokens", "total_tokens", "totalTokens")
-	if total <= 0 {
-		total = inTok + outTok + reaTok
-	}
-	// top-level token fallbacks
-	if total <= 0 {
-		total = getI(raw, "TotalTokens", "total_tokens", "totalTokens")
-	}
-	headers := map[string][]string{}
-	if h, ok := raw["ResponseHeaders"].(map[string]any); ok {
-		for k, v := range h {
-			switch t := v.(type) {
-			case []any:
-				arr := make([]string, 0, len(t))
-				for _, x := range t {
-					arr = append(arr, fmt.Sprint(x))
-				}
-				headers[k] = arr
-			case []string:
-				headers[k] = t
-			case string:
-				headers[k] = []string{t}
-			}
-		}
-	}
-	return xaiquota.UsageEvent{
-		AuthIndex:       getS("AuthIndex", "auth_index", "authIndex"),
-		Provider:        getS("Provider", "provider"),
-		AuthType:        getS("AuthType", "auth_type", "authType"),
-		Failed:          failed || status >= 400 || body != "",
-		StatusCode:      status,
-		Body:            body,
-		ResponseHeaders: headers,
-		InputTokens:     inTok,
-		OutputTokens:    outTok,
-		ReasoningTokens: reaTok,
-		TotalTokens:     total,
-	}, true
+	guard().HandleUsage(ev)
+	return okEnvelopeJSON("{}")
 }
